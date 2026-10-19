@@ -37,6 +37,19 @@ Ubuntu Linux: processes, filesystems, systemd, D-Bus, power interfaces
 
 Only the package boundaries listed under "Component model" exist today, and they are empty. The workload registry, process supervisor, compatibility manager, scheduler, and event logger have no packages yet; they will be added in the stage that implements them rather than as empty placeholders.
 
+## Detailed design (Stage 01)
+
+This overview stays the high-level summary. The detailed Stage 01 design lives in these documents:
+
+- [Requirements specification](../requirements/requirements.md) and [stage traceability matrix](../requirements/traceability.md)
+- [Component architecture and contracts](components.md)
+- [Data and state models](data-model.md)
+- [Checkpoint backend contract](checkpoint-backend.md)
+- [Storage and recovery design](storage-recovery.md)
+- [Power and sleep design](power-sleep.md)
+- [IPC and security design](ipc-security.md)
+- Decisions: [ADR 0001](../decisions/0001-technology-stack.md), [ADR 0002](../decisions/0002-ipc-protocol-and-authentication.md), [ADR 0003](../decisions/0003-checkpoint-publication-and-catalog-durability.md)
+
 ## Architectural invariants
 
 1. NapGuard is Linux-only. macOS is only a development host.

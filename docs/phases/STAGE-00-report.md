@@ -3,6 +3,7 @@
 - Date: 2026-10-19
 - Branch: `stage-00/workflow-baseline` (no commits yet)
 - Verdict: **BLOCKED** — no Ubuntu baseline results have been reviewed yet.
+- **Addendum (2026-10-19, during Stage 01):** The user reported that all mandatory Ubuntu checks passed on commit `931369dab8c84534160821039b863f38c7f737b3`. The verdict is therefore **PASS, based on user-reported results**; see [Ubuntu results](#addendum-ubuntu-results-user-reported) below. The original text that follows is preserved as written before the Ubuntu run.
 
 Stage 00 continues the earlier Phase/Layer 0 work under the approved workflow (macOS → Git → GitHub → Ubuntu in UTM, no SSH). The historical records are preserved unchanged apart from a forward pointer:
 
@@ -195,3 +196,23 @@ Git state changed: created the branch `stage-00/workflow-baseline` while `main` 
 | No unaddressed mandatory failure | Items 1–2 in section 7 | BLOCKED |
 
 **Stage 00: BLOCKED.** STOP: do not start Stage 01.
+
+## Addendum: Ubuntu results (user-reported)
+
+Recorded 2026-10-19 during Stage 01. The user ran `scripts/layer0-ubuntu-check.sh` inside the UTM VM and reported that every mandatory check passed on commit `931369dab8c84534160821039b863f38c7f737b3`, with this environment:
+
+- Ubuntu 24.04.5 LTS, aarch64 (ARM64), Python 3.12.3
+- systemd and the system D-Bus available
+- Git, virtual environment creation, package install and import, pytest, Ruff, and mypy all passing
+- checkout clean
+- DMTCP and CRIU not installed (not evaluated, as intended for Stage 00)
+
+The raw script log was not supplied to Claude, so the per-check output is not reproduced here. If the log is added later, it should be attached under `docs/test-reports/`.
+
+GitHub synchronization, superseding section 6:
+
+- `origin` is `https://github.com/kolursamith/Napgaurd.git` (public, by the user's choice).
+- `stage-00/workflow-baseline` was pushed normally (no force), and `git ls-remote` confirmed the remote branch at `931369dab8c84534160821039b863f38c7f737b3`.
+- No `main` branch exists yet; GitHub's default branch is currently `stage-00/workflow-baseline`.
+
+**Updated verdict: Stage 00 PASS (user-reported Ubuntu evidence).**
