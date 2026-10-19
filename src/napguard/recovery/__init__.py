@@ -1,0 +1,2 @@
+"""Cold-boot recovery orchestration."""
+

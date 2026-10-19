@@ -1,0 +1,56 @@
+.DS_Store
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python caches and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Build outputs
+*.egg-info/
+build/
+dist/
+
+# Local environment and credential files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# Local runtime databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Runtime sockets
+*.sock
+
+# Checkpoint images and process-memory dumps
+checkpoints/
+*.dmtcp
+dmtcp_restart_script*
+*.dump
+*.dmp
+*.core
+vgcore.*
+
+# Temporary experiment artifacts
+experiments/**/output/
+experiments/**/tmp/
+*.tmp
+*.log
