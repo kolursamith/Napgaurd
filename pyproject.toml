@@ -23,17 +23,22 @@ packages = ["src/napguard"]
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
+# Stage 02 experiment package (ngexp) is importable by its unit tests.
+pythonpath = ["experiments/stage02"]
 
 [tool.ruff]
 line-length = 100
-src = ["src", "tests"]
+src = ["src", "tests", "experiments/stage02"]
 target-version = "py312"
 
 [tool.ruff.lint]
 select = ["B", "E4", "E7", "E9", "F", "I", "UP"]
 
 [tool.mypy]
-files = ["src", "tests"]
+files = ["src", "tests", "experiments/stage02"]
+mypy_path = "experiments/stage02"
 python_version = "3.12"
+# NapGuard is Linux-only: type-check against Linux stubs on every host.
+platform = "linux"
 strict = true
 

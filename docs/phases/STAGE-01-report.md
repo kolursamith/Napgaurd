@@ -155,3 +155,15 @@ The baseline script re-verifies commit identity, a clean tree, install, import, 
 | Linux assumptions A-01 to A-11 verified on Ubuntu | assumptions script log | NOT RUN |
 
 **STOP: Stage 02 has not been started.**
+
+## Addendum: Ubuntu verification (user-reported)
+
+Recorded 2026-10-19 at the start of Stage 02. The user reported Stage 01 as **PASS** on Ubuntu 24.04 LTS aarch64 at commit `39714383fcd9b683f367e7476882bfb7102adaa3`:
+
+- The baseline script passed, and the working tree was clean at the approved commit.
+- `scripts/stage01_linux_assumptions.py` passed.
+- The root filesystem is `/dev/vda2` (ext4). The test user is `samith`.
+- The VM exposes no battery (A-01 confirmed).
+- Neither `dmtcp` nor `criu` has an APT install candidate in the VM's current package metadata (A-10 answered: not available).
+
+The raw logs were not supplied to Claude and are not reproduced here.

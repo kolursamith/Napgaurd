@@ -86,6 +86,23 @@ All statements in this section are UNVERIFIED on the target until Stage 02. They
 | Open TCP connections | Has a plugin mechanism. Behaviour must be measured. | Documented `--tcp-established` option, with constraints. | LIM-003: report what is measured, promise nothing. |
 | aarch64 support | Historically focused on x86. ARM64 status unknown. Ubuntu 24.04 arm64 package availability unknown. | Has an aarch64 port. Ubuntu 24.04 package availability unknown. | **Stage 02 must establish installability and basic operation on the actual VM before anything is built on it.** |
 
+### Stage 02 research update (2026-10-19)
+
+These are source-level facts from the upstream repositories and the Launchpad archives. Execution on the VM is still unverified. Details and citations are in the [Stage 02 report](../phases/STAGE-02-report.md).
+
+- **DMTCP ARM64 status:**
+  - DMTCP 3.1.0 and later list aarch64 as supported, and v4.2.0 (2026-06-26) is current.
+  - Upstream CI builds only on x86-64 runners.
+  - `mtcp_restart.c` still carries an aarch64 TODO.
+  - Not packaged for Ubuntu 24.04, so it must be built from source as the user (`experiments/stage02/build-dmtcp.sh`).
+- **DMTCP coordinator:** the standalone coordinator listens on all interfaces (`JSockAddr::ANY`), with no authentication found in the source. This is a security concern for SEC-001/SEC-002-style isolation, tracked as OD-13. No supported loopback-only option exists in v4.2.0 or on `main` (`--no-coordinator` was removed), so the Stage 02 harness refuses to start a coordinator.
+- **CRIU packaging:**
+  - Not in the Ubuntu 24.04 archive. It appears only in newer Ubuntu series.
+  - The CRIU team's PPA publishes 4.2.1 for noble/arm64.
+  - A source build is possible (`experiments/stage02/build-criu.sh`).
+- **CRIU non-root operation:** it needs `CAP_CHECKPOINT_RESTORE`, plus `CAP_SYS_PTRACE` under Yama `ptrace_scope=1`, plus `--unprivileged`. This conflicts with SEC-010 unless an ADR approves it (OD-02, OD-14).
+- **CRIU file validation:** CRIU records the size of every open regular file and refuses to restore if the size changed (`criu/files-reg.c`). A workload that keeps appending to an open file is therefore expected to be unrestorable after it continues running (LIM-007).
+
 ## Stage 02 feasibility protocol (input to Stage 02, not executed in Stage 01)
 
 1. **Package availability.** Check archive availability read-only (`apt-cache policy dmtcp criu`). Any installation from the archive or a source build needs user approval and must be recorded.
