@@ -95,7 +95,7 @@ These are source-level facts from the upstream repositories and the Launchpad ar
   - Upstream CI builds only on x86-64 runners.
   - `mtcp_restart.c` still carries an aarch64 TODO.
   - Not packaged for Ubuntu 24.04, so it must be built from source as the user (`experiments/stage02/build-dmtcp.sh`).
-- **DMTCP coordinator:** the standalone coordinator listens on all interfaces (`JSockAddr::ANY`), with no authentication found in the source. This is a security concern for SEC-001/SEC-002-style isolation, tracked as OD-13. No supported loopback-only option exists in v4.2.0 or on `main` (`--no-coordinator` was removed), so the Stage 02 harness refuses to start a coordinator.
+- **DMTCP coordinator:** the standalone coordinator listens on all interfaces (`JSockAddr::ANY`), with no authentication found in the source. This is a security concern for SEC-001/SEC-002-style isolation, tracked as OD-13. No supported loopback-only option exists in v4.2.0 or on `main` (`--no-coordinator` was removed), so the Stage 02 harness refuses to start a coordinator for trials. A fail-closed loopback hand-off (a pre-bound 127.0.0.1 listener passed on DMTCP's internal fd 821) is implemented for verification only; see Stage 02 report section N.
 - **CRIU packaging:**
   - Not in the Ubuntu 24.04 archive. It appears only in newer Ubuntu series.
   - The CRIU team's PPA publishes 4.2.1 for noble/arm64.

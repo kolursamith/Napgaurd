@@ -23,8 +23,10 @@ packages = ["src/napguard"]
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
-# Stage 02 experiment package (ngexp) is importable by its unit tests.
-pythonpath = ["experiments/stage02"]
+# Make plain `python3 -m pytest` work from a fresh checkout without installing the
+# package or setting PYTHONPATH: the src-layout package and the Stage 02 experiment
+# package (ngexp) are put on sys.path for the test session only.
+pythonpath = ["src", "experiments/stage02"]
 
 [tool.ruff]
 line-length = 100

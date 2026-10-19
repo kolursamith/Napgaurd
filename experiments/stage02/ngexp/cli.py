@@ -6,12 +6,13 @@ import argparse
 import json
 import os
 import platform
+import shutil
 from pathlib import Path
 
 from . import trial
 from .backends import Criu, Dmtcp, tool_version
 from .results import EXIT_CODES, Status
-from .runner import Recorder, environment, git_revision
+from .runner import Recorder, environment, git_revision, read_text
 
 
 def default_run_root() -> Path:
@@ -48,7 +49,35 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("reboot-resume", help="after a reboot: verify artifacts, restore, verify")
     s.add_argument("--run-dir", type=Path, required=True)
+
+    sub.add_parser("dmtcp-isolation-check",
+                   help="start ONE DMTCP coordinator on a pre-bound 127.0.0.1 listener, prove it "
+                        "is unreachable from other addresses, stop it (no workload, no checkpoint)")
     return p
+
+
+def netns_probe(rec: Recorder) -> dict[str, object]:
+    """Informational OD-13 input: can this user create a network namespace with only `lo`?
+
+    Creates and immediately discards a namespace; changes nothing persistent.
+    """
+    result: dict[str, object] = {
+        "apparmor_restrict_unprivileged_userns": read_text(
+            "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"),
+        "unprivileged_userns_clone": read_text("/proc/sys/kernel/unprivileged_userns_clone"),
+    }
+    for name, argv in (
+        ("unshare", ["unshare", "--user", "--map-root-user", "--net", "--fork", "--",
+                     "sh", "-c", "ip link set lo up && ip -br addr show"]),
+        ("bwrap", ["bwrap", "--unshare-net", "--ro-bind", "/", "/", "--dev", "/dev",
+                   "--proc", "/proc", "--", "sh", "-c", "ip -br addr show"]),
+    ):
+        if shutil.which(argv[0]) is None:
+            result[name] = "not installed"
+            continue
+        res = rec.run(f"netns-{name}", argv, timeout=15)
+        result[name] = {"exit": res.exit_code, "output": (res.stdout() + res.stderr()).strip()}
+    return result
 
 
 def cmd_env(args: argparse.Namespace) -> Status:
@@ -63,6 +92,7 @@ def cmd_env(args: argparse.Namespace) -> Status:
     for name, check in probes.items():
         report[name] = check.to_json()
     report["cc"] = tool_version(["cc", "--version"])
+    report["network_namespace_probe"] = netns_probe(rec)
     (rec.run_dir / "env.json").write_text(json.dumps(report, indent=2, sort_keys=True),
                                           encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -91,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
         status = trial.run_matrix(opts(), args.classes)
     elif args.command == "reboot-prepare":
         status = trial.reboot_prepare(opts(args.workload_class))
+    elif args.command == "dmtcp-isolation-check":
+        status = trial.dmtcp_isolation_check(args.run_root, args.dmtcp_prefix)
     else:
         status = trial.reboot_resume(args.run_dir)
     return EXIT_CODES[status]

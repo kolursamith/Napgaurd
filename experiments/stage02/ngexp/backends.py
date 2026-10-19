@@ -7,10 +7,12 @@ vectors are built by pure functions so they can be unit-tested on any host.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from collections.abc import Sequence
@@ -25,8 +27,13 @@ from .runner import (
     Tracked,
     alive,
     collect_artifacts,
+    current_listeners,
     leader_exited_unreaped,
+    listener_violations,
+    loopback_listener,
+    non_loopback_ipv4_addresses,
     read_text,
+    tcp_reachable,
     wait_until,
 )
 
@@ -48,12 +55,31 @@ DMTCP_COORDINATOR_BLOCKER = (
 )
 
 
-def listeners_loopback_only(ss_output: str) -> bool:
-    """True if `ss -Hltn` output lists at least one listener and all are on loopback."""
-    locals_ = [line.split()[3] for line in ss_output.splitlines() if len(line.split()) >= 4]
-    if not locals_:
-        return False
-    return all(addr.startswith(("127.", "[::1]:", "::1:")) for addr in locals_)
+# Candidate OD-13 mitigation (Stage 02 investigation): hand the coordinator a listener
+# that the harness has already bound to 127.0.0.1. In DMTCP 4.2.0 the coordinator first
+# checks for an inherited listener on PROTECTED_COORD_FD and uses it
+# (dmtcp_coordinator.cpp:1738-1742); dmtcp_launch --new-coordinator uses the same hand-off
+# internally (coordinatorapi.cpp:490-508), so this is DMTCP's own mechanism, but it is not
+# a documented user option. PROTECTED_COORD_FD = PROTECTED_FD_START (820) + 1
+# (include/protectedfds.h). The analysis is valid only for the pinned version.
+# Fail-closed: the coordinator is also told `--coord-port <same port>`. If it ignored the
+# inherited listener and fell back to binding INADDR_ANY:<port>, Linux refuses that bind
+# with EADDRINUSE while our 127.0.0.1:<port> socket is listening, and the coordinator exits.
+PROTECTED_COORD_FD = 821
+FD_HANDOFF_ANALYSED_VERSION = "4.2.0"
+
+
+def wildcard_bind_refused(port: int) -> bool:
+    """True if binding 0.0.0.0:port fails with EADDRINUSE (the fail-closed property)."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("0.0.0.0", port))
+    except OSError as exc:
+        return exc.errno == errno.EADDRINUSE
+    finally:
+        probe.close()
+    return False
 
 
 @dataclass
@@ -94,9 +120,11 @@ def find_dmtcp(prefix: Path | None) -> DmtcpTools | None:
     return None
 
 
-def dmtcp_coordinator_argv(tools: DmtcpTools, port_file: Path, ckpt_dir: Path) -> list[str]:
-    # Port 0 = kernel-assigned free port, written to port_file.
-    return [tools.coordinator, "--coord-port", "0", "--port-file", str(port_file),
+def dmtcp_coordinator_argv(tools: DmtcpTools, port_file: Path, ckpt_dir: Path,
+                           port: int) -> list[str]:
+    # `port` is the port of the pre-bound loopback listener handed over on fd 821; passing
+    # the same port makes any fallback INADDR_ANY bind fail (see FD_HANDOFF_ANALYSED_VERSION).
+    return [tools.coordinator, "--coord-port", str(port), "--port-file", str(port_file),
             "--ckptdir", str(ckpt_dir)]
 
 
@@ -128,6 +156,7 @@ class Dmtcp:
         self.ckpt_dir = rec.run_dir / "checkpoint"
         self.tmp_dir = rec.run_dir / "dmtcp-tmp"
         self.version = "unknown"
+        self.listeners: list[socket.socket] = []  # held open until cleanup
 
     def probe(self) -> Check:
         if self.tools is None:
@@ -147,24 +176,102 @@ class Dmtcp:
         return Check("backend available", Status.PASS, f"DMTCP {self.version}", facts=facts)
 
     def _coordinator(self, label: str) -> tuple[Tracked, int]:
-        assert self.tools is not None
+        """Coordinator for trials: refused until the loopback hand-off is verified and approved."""
         if not DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED:
             raise BackendStepError(DMTCP_COORDINATOR_BLOCKER)  # nothing has been spawned
+        coord, port, _ = self._loopback_coordinator(label)
+        return coord, port
+
+    def _loopback_coordinator(self, label: str) -> tuple[Tracked, int, dict[str, Any]]:
+        """Start a coordinator on a pre-bound 127.0.0.1 listener; abort on any exposure."""
+        assert self.tools is not None
+        if FD_HANDOFF_ANALYSED_VERSION not in self.version:
+            raise BackendStepError(f"fd hand-off was analysed for DMTCP {FD_HANDOFF_ANALYSED_VERSION} "
+                                   f"only; found {self.version!r}")
+        listener = loopback_listener()
+        port = int(listener.getsockname()[1])
+        if not wildcard_bind_refused(port):
+            listener.close()
+            raise BackendStepError(f"kernel allowed 0.0.0.0:{port} next to the loopback listener; "
+                                   "the fail-closed guarantee does not hold, refusing")
+        self.listeners.append(listener)
         port_file = self.rec.run_dir / f"{label}.port"
         self.ckpt_dir.mkdir(exist_ok=True, mode=0o700)
-        coord = self.rec.spawn(label, dmtcp_coordinator_argv(self.tools, port_file, self.ckpt_dir),
-                               cwd=self.ckpt_dir)
-        ok = wait_until(lambda: read_text(str(port_file), "").isdigit(), timeout=15)
-        if not ok:
-            raise BackendStepError(f"{label} did not publish its port within 15 s")
-        port = int(read_text(str(port_file)))
-        listening = self.rec.run(f"{label}-listen", ["ss", "-Hltn", f"sport = :{port}"], timeout=10)
-        self.rec.event("dmtcp_coordinator", label=label, port=port,
-                       listen=listening.stdout().strip())
-        if not (listening.ok and listeners_loopback_only(listening.stdout())):
+        try:
+            coord = self.rec.spawn(label, dmtcp_coordinator_argv(self.tools, port_file,
+                                                                 self.ckpt_dir, port),
+                                   cwd=self.ckpt_dir,
+                                   fd_map=(listener.fileno(), PROTECTED_COORD_FD))
+        except (OSError, RuntimeError) as exc:
+            raise BackendStepError(f"could not start {label}: {exc}") from exc
+        assert coord.popen is not None
+        popen = coord.popen
+        wait_until(lambda: read_text(str(port_file), "").isdigit()
+                   or leader_exited_unreaped(popen), timeout=15)
+        written = read_text(str(port_file), "")
+        if not written.isdigit() or int(written) != port:
             self.rec.terminate(coord, sig=signal.SIGKILL)
-            raise BackendStepError(f"{label} is not loopback-only: {listening.stdout().strip()!r}")
-        return coord, port
+            raise BackendStepError(f"{label} did not adopt the loopback listener on port {port}")
+        facts = self.verify_isolation(coord, port, label)
+        return coord, port, facts
+
+    def verify_isolation(self, coord: Tracked, port: int, label: str) -> dict[str, Any]:
+        """Evidence that the coordinator is reachable only on loopback; kill it otherwise.
+
+        Fails closed: if the audit itself cannot run (ss/ip missing, error, timeout), the
+        coordinator is killed and the step fails.
+        """
+        try:
+            listeners = current_listeners()
+            addresses = non_loopback_ipv4_addresses()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            self.rec.terminate(coord, sig=signal.SIGKILL)
+            raise BackendStepError(f"listener audit failed for {label}: {exc}") from exc
+        on_port = [lst for lst in listeners if lst.port == port]
+        exposed = listener_violations(listeners, {coord.ident.pid})
+        reachable = {addr: tcp_reachable(addr, port) for addr in addresses}
+        facts: dict[str, Any] = {
+            "port": port,
+            "listeners_on_port": [lst.__dict__ for lst in on_port],
+            "coordinator_non_loopback_listeners": [lst.__dict__ for lst in exposed],
+            "non_loopback_connect_results": reachable,
+        }
+        self.rec.event("dmtcp_isolation", label=label, **facts)
+        if not on_port or not all(lst.loopback for lst in on_port) or exposed or any(
+                reachable.values()):
+            self.rec.terminate(coord, sig=signal.SIGKILL)
+            raise BackendStepError(f"{label} is reachable beyond loopback: {facts}")
+        return facts
+
+    def isolation_check(self) -> list[Check]:
+        """Start one loopback coordinator, prove isolation and function, then stop it.
+
+        Runs no workload and takes no checkpoint. Does not open the trial gate.
+        """
+        checks = [self.probe()]
+        if self.tools is None or "dmtcp_launch --version failed" in checks[0].detail:
+            return checks
+        checks[0] = Check("backend available", Status.PASS, f"DMTCP {self.version}",
+                          facts=checks[0].facts)
+        try:
+            coord, port, facts = self._loopback_coordinator("isolation-coordinator")
+        except BackendStepError as exc:
+            checks.append(Check("coordinator confined to loopback", Status.FAIL, str(exc)))
+            return checks
+        checks.append(Check(
+            "coordinator confined to loopback", Status.PASS,
+            f"listens only on 127.0.0.1:{port}; connections to "
+            f"{sorted(facts['non_loopback_connect_results']) or 'no other IPv4 address'} refused",
+            facts=facts))
+        status = self.rec.run("dmtcp-status", dmtcp_command_argv(self.tools, port, "--status"),
+                              timeout=15)
+        checks.append(Check("coordinator answers on loopback",
+                            Status.PASS if status.ok else Status.FAIL, status.summary()))
+        self.rec.run("dmtcp-quit", dmtcp_command_argv(self.tools, port, "--quit"), timeout=15)
+        gone = self.rec.terminate(coord)
+        checks.append(Check("coordinator stopped", Status.PASS if gone else Status.FAIL,
+                            "coordinator process gone" if gone else "coordinator still alive"))
+        return checks
 
     def launch(self, workload: Sequence[str]) -> Session:
         assert self.tools is not None
@@ -220,12 +327,14 @@ class Dmtcp:
         return kpid  # DMTCP virtualizes getpid(); only the kernel PID identifies the process
 
     def cleanup(self, sessions: Sequence[Session]) -> None:
-        if self.tools is None:
-            return
-        for session in sessions:
-            if "port" in session.data:
-                self.rec.run("dmtcp-quit", dmtcp_command_argv(self.tools, int(session.data["port"]),
-                                                               "--quit"), timeout=15)
+        if self.tools is not None:
+            for session in sessions:
+                if "port" in session.data:
+                    self.rec.run("dmtcp-quit", dmtcp_command_argv(
+                        self.tools, int(session.data["port"]), "--quit"), timeout=15)
+        for listener in self.listeners:
+            listener.close()
+        self.listeners.clear()
 
     def image_paths(self, artifacts: ArtifactSet) -> list[Path]:
         return [self.rec.run_dir / a.path for a in artifacts.items

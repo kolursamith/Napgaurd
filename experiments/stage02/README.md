@@ -35,13 +35,16 @@ The workloads append observations with open/append/close and never read the repo
 ## Commands (inside Ubuntu, from the repository root)
 
 ```sh
-python3 experiments/stage02/run_stage02.py env                          # environment + backend availability
-python3 experiments/stage02/run_stage02.py trial --backend dmtcp --class c-single
-python3 experiments/stage02/run_stage02.py matrix --backend dmtcp       # all classes
-python3 experiments/stage02/run_stage02.py trial --backend criu --class c-single
-python3 experiments/stage02/run_stage02.py reboot-prepare --backend dmtcp
-python3 experiments/stage02/run_stage02.py reboot-resume --run-dir <printed run dir>
+python3 -I experiments/stage02/run_stage02.py env                          # environment + backend availability
+python3 -I experiments/stage02/run_stage02.py trial --backend dmtcp --class c-single
+python3 -I experiments/stage02/run_stage02.py matrix --backend dmtcp       # all classes
+python3 -I experiments/stage02/run_stage02.py trial --backend criu --class c-single
+python3 -I experiments/stage02/run_stage02.py reboot-prepare --backend dmtcp
+python3 -I experiments/stage02/run_stage02.py reboot-resume --run-dir <printed run dir>
+python3 -I experiments/stage02/run_stage02.py dmtcp-isolation-check     # OD-13 evidence only
 ```
+
+`-I` (isolated mode) is intended: PYTHONPATH, the user site directory, and the current directory cannot inject modules. The launcher adds back only its own directory. DMTCP `trial`, `matrix`, and `reboot-*` currently report BLOCKED (see Safety below).
 
 Exit status: 0 PASS, 1 FAIL, 2 BLOCKED, 3 SKIP. A missing backend is BLOCKED, never PASS.
 
@@ -61,5 +64,7 @@ Nothing outside that directory, `~/.cache/napguard-stage02`, or `~/.local/opt/na
 - No sysctl or other global system changes are made.
 - Every command has a timeout and runs in its own session.
 - Only processes the harness created, or adopted by verified identity, are ever signalled. Adoption requires the process to be owned by the user, in a session this run created, and started after the launch or restore command. Groups are signalled only while their leader is the harness's own unreaped child, and adopted processes are signalled through a pidfd.
-- **No DMTCP coordinator is ever started.** DMTCP 4.2.0 coordinators listen on all interfaces without authentication, and no supported option restricts them to loopback, so DMTCP trials report BLOCKED (report I-1a, OD-13). `build-dmtcp.sh` refuses `make check` for the same reason.
+- **DMTCP trials never start a coordinator.** DMTCP 4.2.0 coordinators listen on all interfaces without authentication, and no supported option restricts them, so DMTCP trials report BLOCKED (report I-1a, OD-13). `build-dmtcp.sh` refuses `make check` for the same reason.
+- **The one exception is `dmtcp-isolation-check`**, which starts a single coordinator using DMTCP's internal listener hand-off: a 127.0.0.1 listener pre-bound by the harness, passed on fd 821, with the same `--coord-port`. It is fail-closed: a fallback wildcard bind is refused by the kernel. It then proves the coordinator is unreachable from the VM's other addresses and stops it, without running a workload or taking a checkpoint. A PASS does not open the trial gate; that needs an ADR and approval (report section N).
+- **Trial network guard.** After launch, checkpoint, and restore, any non-loopback listener owned by an experiment process aborts the trial.
 - CRIU dumps only the PID the harness itself launched.

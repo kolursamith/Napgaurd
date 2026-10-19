@@ -13,8 +13,10 @@ TOOLS = backends.DmtcpTools("/p/dmtcp_launch", "/p/dmtcp_command", "/p/dmtcp_coo
 
 
 def test_dmtcp_commands_use_private_loopback_coordinator() -> None:
-    coord = backends.dmtcp_coordinator_argv(TOOLS, Path("/r/c.port"), Path("/r/ckpt"))
-    assert coord[:3] == ["/p/dmtcp_coordinator", "--coord-port", "0"]
+    coord = backends.dmtcp_coordinator_argv(TOOLS, Path("/r/c.port"), Path("/r/ckpt"), 45678)
+    # The coordinator gets the pre-bound loopback port, never 0 (which would let it bind
+    # a fresh INADDR_ANY port instead of failing closed).
+    assert coord[:3] == ["/p/dmtcp_coordinator", "--coord-port", "45678"]
     launch = backends.dmtcp_launch_argv(TOOLS, 7779, Path("/r/ckpt"), Path("/r/tmp"),
                                         ["/r/bin/ngcounter", "--report", "/r/x"])
     assert launch[launch.index("--coord-host") + 1] == "127.0.0.1"

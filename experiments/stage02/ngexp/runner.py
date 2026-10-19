@@ -23,8 +23,10 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -220,8 +222,13 @@ class Recorder:
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         capture: bool = True,
+        fd_map: tuple[int, int] | None = None,
     ) -> Tracked:
-        """Start a background process in its own session and track its identity."""
+        """Start a background process in its own session and track its identity.
+
+        `fd_map=(source_fd, target_fd)` makes `source_fd` available in the child as
+        `target_fd` (and no other extra descriptor is inherited).
+        """
         out_path, err_path = self._next(name)
         print("$ " + " ".join(argv) + "   (background)", flush=True)
         out: IO[bytes] | int
@@ -231,6 +238,17 @@ class Recorder:
             err = err_path.open("ab")
         else:
             out = err = subprocess.DEVNULL
+        pass_fds: tuple[int, ...] = ()
+        if fd_map is not None:
+            source, target = fd_map
+            try:
+                os.fstat(target)
+            except OSError:
+                pass  # target number is free in the harness, as required
+            else:
+                raise RuntimeError(f"fd {target} is already in use in the harness")
+            os.dup2(source, target, inheritable=True)
+            pass_fds = (target,)
         try:
             proc = subprocess.Popen(
                 list(argv),
@@ -240,11 +258,14 @@ class Recorder:
                 cwd=cwd,
                 env=dict(env) if env is not None else None,
                 start_new_session=True,
+                pass_fds=pass_fds,
             )
         finally:
             for fh in (out, err):
                 if not isinstance(fh, int):
                     fh.close()
+            if fd_map is not None:
+                os.close(fd_map[1])  # the child keeps its copy; the source fd stays open
         ident = _identity_soon(proc.pid)
         self.sessions.add(proc.pid)
         tracked = Tracked(name, ident, proc, own_group=True)
@@ -376,6 +397,78 @@ def _killpg_quietly(pgid: int, sig: int) -> None:
         os.killpg(pgid, sig)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+# ------------------------------------------------------------- network guard
+
+
+@dataclass(frozen=True)
+class Listener:
+    proto: str
+    local: str
+    pids: tuple[int, ...]
+
+    @property
+    def loopback(self) -> bool:
+        return self.local.startswith(("127.", "[::1]:", "::1:"))
+
+    @property
+    def port(self) -> int:
+        return int(self.local.rsplit(":", 1)[1])
+
+
+def parse_ss_listeners(output: str, proto: str = "tcp") -> list[Listener]:
+    """Parse `ss -H -l -n -p` lines: State Recv-Q Send-Q Local Peer [users:((...,pid=N,...))]."""
+    found = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        pids = tuple(int(p) for p in re.findall(r"pid=(\d+)", line))
+        found.append(Listener(proto, parts[3], pids))
+    return found
+
+
+def listener_violations(listeners: Sequence[Listener], pids: set[int]) -> list[Listener]:
+    """Non-loopback listeners owned by any of `pids` (an experiment's processes)."""
+    return [lst for lst in listeners if not lst.loopback and set(lst.pids) & pids]
+
+
+def current_listeners() -> list[Listener]:
+    """All TCP and UDP listeners; owners are visible for this user's own processes."""
+    found: list[Listener] = []
+    for proto, flag in (("tcp", "-t"), ("udp", "-u")):
+        done = subprocess.run(["ss", "-H", "-l", "-n", "-p", flag], capture_output=True,
+                              text=True, timeout=10)
+        if done.returncode != 0:
+            raise RuntimeError(f"ss {flag} failed: {done.stderr.strip()}")
+        found.extend(parse_ss_listeners(done.stdout, proto))
+    return found
+
+
+def non_loopback_ipv4_addresses() -> list[str]:
+    done = subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True,
+                          timeout=10)
+    if done.returncode != 0:  # never silently skip the external-reachability test
+        raise RuntimeError(f"ip -o -4 addr show failed: {done.stderr.strip()}")
+    addrs = re.findall(r"\binet (\d+\.\d+\.\d+\.\d+)/", done.stdout)
+    return [a for a in addrs if not a.startswith("127.")]
+
+
+def tcp_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def loopback_listener() -> socket.socket:
+    """A TCP listener bound to 127.0.0.1 on a kernel-chosen port (no SO_REUSEPORT)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(128)
+    return sock
 
 
 # ---------------------------------------------------------------- environment

@@ -6,13 +6,14 @@ import os
 import platform
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
 from ngexp import backends, runner
-from ngexp.results import Status
+from ngexp.results import Check, Status
 
 linux_only = pytest.mark.skipif(platform.system() != "Linux", reason="needs Linux /proc")
 
@@ -25,19 +26,28 @@ def test_parse_stat_handles_hostile_comm() -> None:
     assert parsed == runner.StatFields(state="S", pgid=4242, sid=4242, start_ticks=987654)
 
 
-@pytest.mark.parametrize(
-    ("ss_output", "expected"),
-    [
-        ("LISTEN 0 128 127.0.0.1:7779 0.0.0.0:*\n", True),
-        ("LISTEN 0 128 [::1]:7779 [::]:*\n", True),
-        ("LISTEN 0 128 0.0.0.0:7779 0.0.0.0:*\n", False),
-        ("LISTEN 0 128 127.0.0.1:7779 0.0.0.0:*\nLISTEN 0 128 [::]:7779 [::]:*\n", False),
-        ("LISTEN 0 128 192.168.64.2:7779 0.0.0.0:*\n", False),
-        ("", False),  # no evidence of a listener is not evidence of safety
-    ],
+SS_TCP = (
+    'LISTEN 0 128 127.0.0.1:45678 0.0.0.0:* users:(("dmtcp_coordinat",pid=500,fd=821),'
+    '("python3",pid=400,fd=3))\n'
+    'LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n'
+    'LISTEN 0 4096 [::]:41000 [::]:* users:(("ngcounter",pid=600,fd=5))\n'
+    'LISTEN 0 128 [::1]:631 [::]:*\n'
 )
-def test_listeners_loopback_only(ss_output: str, expected: bool) -> None:
-    assert backends.listeners_loopback_only(ss_output) is expected
+
+
+def test_parse_ss_listeners_and_violations() -> None:
+    listeners = runner.parse_ss_listeners(SS_TCP)
+    assert [(lst.local, lst.loopback, lst.pids) for lst in listeners] == [
+        ("127.0.0.1:45678", True, (500, 400)),
+        ("0.0.0.0:22", False, ()),
+        ("[::]:41000", False, (600,)),
+        ("[::1]:631", True, ()),
+    ]
+    assert listeners[0].port == 45678
+    # Only experiment-owned non-loopback listeners count: sshd on :22 (no visible owner)
+    # is not ours; the workload's [::]:41000 is a violation.
+    assert runner.listener_violations(listeners, {500, 600}) == [listeners[2]]
+    assert runner.listener_violations(listeners, {500}) == []
 
 
 def fake_dmtcp(tmp_path: Path) -> backends.Dmtcp:
@@ -119,3 +129,156 @@ def test_signal_identity_ignores_a_different_process(tmp_path: Path) -> None:
     finally:
         proc.kill()
         proc.wait()
+
+
+GOOD_COORDINATOR = """
+import socket, sys, time
+args = sys.argv[1:]
+listener = socket.socket(fileno=821)          # inherited, pre-bound by the harness
+with open(args[args.index("--port-file") + 1], "w") as fh:
+    fh.write(str(listener.getsockname()[1]))
+time.sleep(60)
+"""
+
+# Simulates a coordinator that ignores the inherited listener and falls back to
+# INADDR_ANY on --coord-port, as DMTCP would if the hand-off stopped working.
+FALLBACK_COORDINATOR = """
+import socket, sys, time
+args = sys.argv[1:]
+port = int(args[args.index("--coord-port") + 1])
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", port))                    # must fail: EADDRINUSE
+s.listen(1)
+with open(args[args.index("--port-file") + 1], "w") as fh:
+    fh.write(str(port))
+time.sleep(60)
+"""
+
+
+def coordinator_backend(tmp_path: Path, source: str) -> backends.Dmtcp:
+    script = tmp_path / "fake_coordinator.py"
+    script.write_text(f"#!{sys.executable}\n{source}", encoding="utf-8")
+    script.chmod(0o700)
+    dmtcp = fake_dmtcp(tmp_path)
+    dmtcp.tools = backends.DmtcpTools(str(script), str(script), str(script), str(script))
+    dmtcp.version = "dmtcp_launch (DMTCP) 4.2.0"
+    return dmtcp
+
+
+@linux_only
+def test_wildcard_bind_is_refused_next_to_loopback_listener() -> None:
+    listener = runner.loopback_listener()
+    try:
+        assert backends.wildcard_bind_refused(listener.getsockname()[1]) is True
+    finally:
+        listener.close()
+
+
+@linux_only
+def test_loopback_coordinator_handoff_is_confined(tmp_path: Path) -> None:
+    dmtcp = coordinator_backend(tmp_path, GOOD_COORDINATOR)
+    coord, port, facts = dmtcp._loopback_coordinator("fake-coordinator")
+    assert facts["port"] == port and not any(facts["non_loopback_connect_results"].values())
+    try:
+        listeners = [lst for lst in runner.current_listeners() if lst.port == port]
+        assert listeners and all(lst.loopback for lst in listeners)
+        assert coord.ident.pid in {pid for lst in listeners for pid in lst.pids}
+    finally:
+        assert dmtcp.rec.terminate(coord)
+        dmtcp.cleanup([])
+
+
+@linux_only
+def test_coordinator_ignoring_handoff_fails_closed(tmp_path: Path) -> None:
+    dmtcp = coordinator_backend(tmp_path, FALLBACK_COORDINATOR)
+    with pytest.raises(backends.BackendStepError, match="did not adopt the loopback listener"):
+        dmtcp._loopback_coordinator("fallback-coordinator")
+    dmtcp.cleanup([])
+    assert dmtcp.rec.cleanup() == []
+    exposed = [lst for lst in runner.current_listeners() if not lst.loopback
+               and set(lst.pids) & {t.ident.pid for t in dmtcp.rec.tracked}]
+    assert exposed == []
+
+
+def test_trial_gate_stays_closed_even_with_handoff_available(tmp_path: Path) -> None:
+    dmtcp = coordinator_backend(tmp_path, GOOD_COORDINATOR)
+    with pytest.raises(backends.BackendStepError, match="refusing to start a DMTCP coordinator"):
+        dmtcp.launch(["/bin/sleep", "30"])
+    assert dmtcp.rec.tracked == []
+
+
+def test_listener_audit_failure_kills_coordinator_and_fails(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dmtcp = fake_dmtcp(tmp_path)
+    killed: list[int] = []
+
+    def no_ss() -> list[runner.Listener]:
+        raise RuntimeError("ss: command not found")
+
+    monkeypatch.setattr(backends, "current_listeners", no_ss)
+    def record_kill(tracked: runner.Tracked, grace: float = 3.0,
+                    sig: int = signal.SIGTERM) -> bool:
+        killed.append(sig)
+        return True
+
+    monkeypatch.setattr(dmtcp.rec, "terminate", record_kill)
+    coord = runner.Tracked("fake", runner.ProcId(999_999, 1, os.getuid()))
+    with pytest.raises(backends.BackendStepError, match="listener audit failed"):
+        dmtcp.verify_isolation(coord, 45678, "fake")
+    assert killed == [signal.SIGKILL]
+
+
+def test_isolation_check_reports_fail_instead_of_crashing(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dmtcp = fake_dmtcp(tmp_path)
+    monkeypatch.setattr(dmtcp, "probe", lambda: Check(
+        "backend available", Status.BLOCKED, "DMTCP 4.2.0 installed, but refusing", facts={}))
+
+    def broken(label: str) -> tuple[runner.Tracked, int, dict[str, object]]:
+        raise backends.BackendStepError("could not start isolation-coordinator: fd 821 in use")
+
+    monkeypatch.setattr(dmtcp, "_loopback_coordinator", broken)
+    checks = dmtcp.isolation_check()
+    assert [c.status for c in checks] == [Status.PASS, Status.FAIL]
+    assert "fd 821 in use" in checks[1].detail
+
+
+def test_missing_ip_tool_is_an_error_not_an_empty_address_list(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["ip"], 1, "", "ip: not found")
+
+    monkeypatch.setattr(subprocess, "run", failing_run)  # runner calls subprocess.run
+    with pytest.raises(RuntimeError, match="ip -o -4 addr show failed"):
+        runner.non_loopback_ipv4_addresses()
+
+
+def fake_dmtcp_prefix(tmp_path: Path) -> Path:
+    prefix = tmp_path / "dmtcp-4.2.0"
+    (prefix / "bin").mkdir(parents=True)
+    for name in ("dmtcp_launch", "dmtcp_command", "dmtcp_coordinator", "dmtcp_restart"):
+        tool = prefix / "bin" / name
+        tool.write_text("#!/bin/sh\necho 'dmtcp_launch (DMTCP) 4.2.0'\n", encoding="utf-8")
+        tool.chmod(0o700)
+    return prefix
+
+
+@linux_only
+@pytest.mark.parametrize("entry", ["trial", "matrix", "reboot-prepare"])
+def test_dmtcp_trial_matrix_and_reboot_gates_stay_closed(tmp_path: Path, entry: str) -> None:
+    from ngexp import trial
+
+    opts = trial.Options(backend="dmtcp", workload_class="c-single", run_root=tmp_path / "runs",
+                         dmtcp_prefix=fake_dmtcp_prefix(tmp_path))
+    opts.run_root.mkdir()
+    if entry == "trial":
+        status = trial.run_trial(opts)
+    elif entry == "matrix":
+        status = trial.run_matrix(opts, ["c-single", "py"])
+    else:
+        status = trial.reboot_prepare(opts)
+    assert status is Status.BLOCKED
+    for commands in opts.run_root.glob("*/commands.jsonl"):
+        assert '"kind": "spawn"' not in commands.read_text(encoding="utf-8")
+    assert not list(opts.run_root.glob("*/reboot-manifest.json"))

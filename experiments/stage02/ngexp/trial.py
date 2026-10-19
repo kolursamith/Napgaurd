@@ -21,6 +21,7 @@ import os
 import secrets
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -35,11 +36,15 @@ from .runner import (
     PERSISTENT_FS,
     ArtifactSet,
     Recorder,
+    alive,
     boot_id,
     boot_ticks_now,
     collect_artifacts,
+    current_listeners,
     environment,
     git_revision,
+    listener_violations,
+    running_group_members,
     sha256_file,
     utc_now,
     wait_until,
@@ -235,6 +240,7 @@ def launch_and_checkpoint(state: TrialState, opts: Options, wc: WorkloadClass,
     launched_at = boot_ticks_now()
     session = backend.launch(workload_argv(state, wc, report, "managed"))
     state.sessions.append(session)
+    guard_network(state, "launch")
     if not wait_for_roles(report, wc.roles, 0, 3, timeout=30):
         state.add(Check("managed workload running", Status.FAIL,
                         "no observations from every role within 30 s"))
@@ -252,6 +258,7 @@ def launch_and_checkpoint(state: TrialState, opts: Options, wc: WorkloadClass,
     state.rec.event("mark_ckpt_request", lower=lower, line=request_line)
     ckpt_check, artifacts = backend.checkpoint(session)
     state.add(ckpt_check)
+    guard_network(state, "checkpoint")
     if ckpt_check.status is not Status.PASS:
         return None
     done_line = model.count_lines(report)
@@ -306,6 +313,7 @@ def restore_and_verify(state: TrialState, opts: Options, wc: WorkloadClass, back
                         f"{len(restored)} observations within 30 s of restore"))
         return
     adopt_reported(state, backend, model.read_reports(report, kill_line), "restored", restore_at)
+    guard_network(state, "restore")
     time.sleep(opts.observe_s)
     restored = model.read_reports(report, kill_line)
     state.facts["restore_to_first_report_s"] = round(time.monotonic() - started - opts.observe_s, 3)
@@ -325,6 +333,27 @@ def finish(state: TrialState, backend: Backend) -> None:
     state.add(Check("experiment processes cleaned up",
                     Status.PASS if not survivors else Status.FAIL,
                     "all tracked processes gone" if not survivors else f"still alive: {survivors}"))
+
+
+def guard_network(state: TrialState, step: str) -> None:
+    """Abort the trial if any experiment process listens beyond loopback (OD-13 guard)."""
+    pids: set[int] = set()
+    for tracked in state.rec.tracked:
+        if tracked.own_group and tracked.popen is not None and tracked.popen.returncode is None:
+            pids.update(m.ident.pid for m in running_group_members(tracked.ident.pid))
+        elif alive(tracked.ident):
+            pids.add(tracked.ident.pid)
+    try:
+        listeners = current_listeners()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        state.rec.cleanup()
+        raise BackendStepError(f"after {step}: listener audit failed, stopping: {exc}") from exc
+    exposed = listener_violations(listeners, pids)
+    if exposed:
+        state.rec.event("network_exposure", step=step, listeners=[e.__dict__ for e in exposed])
+        state.rec.cleanup()
+        raise BackendStepError(f"after {step}: experiment process listening beyond loopback: "
+                               + ", ".join(f"{e.proto} {e.local} pids={e.pids}" for e in exposed))
 
 
 # --------------------------------------------------------------- entrypoints
@@ -462,3 +491,24 @@ def reboot_resume(run_dir: Path) -> Status:
         finally:
             finish(state, backend)
     return write_result(state, opts, "reboot-resume")
+
+
+def dmtcp_isolation_check(run_root: Path, dmtcp_prefix: Path | None) -> Status:
+    """OD-13 evidence: one loopback-confined coordinator; no workload, no checkpoint."""
+    opts = Options(backend="dmtcp", workload_class="-", run_root=run_root,
+                   dmtcp_prefix=dmtcp_prefix)
+    run_dir = new_run_dir(run_root, "dmtcp-isolation-check")
+    state = TrialState(run_dir, Recorder(run_dir))
+    backend = Dmtcp(state.rec, dmtcp_prefix)
+    try:
+        for check in backend.isolation_check():
+            state.add(check)
+    finally:
+        backend.cleanup([])
+        survivors = state.rec.cleanup()
+        state.add(Check("experiment processes cleaned up",
+                        Status.PASS if not survivors else Status.FAIL,
+                        "all tracked processes gone" if not survivors else f"alive: {survivors}"))
+    state.facts["trial_gate"] = ("closed: DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED is False; "
+                                 "a PASS here is evidence for OD-13, not permission to run trials")
+    return write_result(state, opts, "dmtcp-isolation-check")

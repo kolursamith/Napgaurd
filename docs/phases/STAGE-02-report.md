@@ -19,6 +19,22 @@ Labels used below:
 
 ---
 
+## Ubuntu results to date (user-reported)
+
+The user ran these on Ubuntu 24.04.5 LTS aarch64 at commit `4879432d7c59b4f5a3516b4f0cb4b165b58ac36a`. Claude did not see the raw logs.
+
+| Check | Result |
+|---|---|
+| Stage 02 Linux safety tests (`test_stage02_safety.py`, including the Linux-only cases) | 13 passed |
+| Full pytest with `PYTHONPATH` set manually | 86 passed, exit 0 |
+| Plain `python3 -m pytest -q` | **FAILED:** `napguard` not importable (src layout, no install, no PYTHONPATH). Fixed: pytest `pythonpath = ["src", "experiments/stage02"]`, plus a regression test. |
+| `python3 -I experiments/stage02/run_stage02.py env` | **FAILED:** `ngexp` not importable (`-I` drops the script's directory). Fixed: the launcher adds exactly its own resolved directory to `sys.path`, plus regression tests. |
+| `run_stage02.py env` without `-I` | ran; **both backends BLOCKED, neither installed** |
+| `kernel.apparmor_restrict_unprivileged_userns` | `1` |
+| Experiment storage | `/dev/vda2`, ext4 (persistent) |
+
+No checkpoint or restore has run on Ubuntu. Neither backend is installed.
+
 ## A. Existing design audit
 
 Inputs read before making changes:
@@ -173,11 +189,11 @@ These ran on macOS 14.8.1 arm64 with Python 3.14.7 (the repository `.venv`). **T
 
 | Command | Exit | Result |
 |---|---|---|
-| `.venv/bin/python -m pytest` | 0 | `83 passed, 3 skipped`: 1 import test, 43 docs-consistency tests, 39 Stage 02 tests, plus 3 Linux-only safety tests that are skipped on macOS and run in the Ubuntu baseline |
+| `.venv/bin/python -m pytest` | 0 | `83 passed, 6 skipped`. The 6 skipped tests are Linux-only safety tests; they run on Ubuntu, where the user reported the earlier 3 passing. |
 | `.venv/bin/ruff check .` | 0 | `All checks passed!` |
-| `.venv/bin/mypy` (all configured files, Linux platform stubs) | 0 | `no issues found in 25 source files` |
-| `.venv/bin/mypy src tests` (the form the Ubuntu baseline runs) | 0 | `no issues found in 15 source files` |
-| `python3 experiments/stage02/run_stage02.py env` | 2 | `BLOCKED: Stage 02 experiments run only on Linux` (correct refusal) |
+| `.venv/bin/mypy` (all configured files, Linux platform stubs) | 0 | `no issues found in 27 source files` |
+| `.venv/bin/mypy src tests` (the form the Ubuntu baseline runs) | 0 | `no issues found in 17 source files` |
+| `python3 -I experiments/stage02/run_stage02.py env` | 2 | `BLOCKED: Stage 02 experiments run only on Linux` (correct refusal) |
 | `bash build-dmtcp.sh`, `bash build-criu.sh` | 1 | `run this inside Ubuntu` (correct refusal); `bash -n` syntax OK |
 | `cc -Wall -Wextra -Werror -pthread workload/ngcounter.c` | 0 | warning-free under Apple clang. GCC on Ubuntu is not yet tested. |
 
@@ -229,7 +245,7 @@ git rev-parse HEAD                                   # must equal the Mac commit
 bash scripts/layer0-ubuntu-check.sh <MAC_COMMIT_SHA> 2>&1 | tee ~/stage02-baseline.log
 
 # 1. Environment and backend availability (read-only)
-python3 experiments/stage02/run_stage02.py env 2>&1 | tee ~/stage02-env.log
+python3 -I experiments/stage02/run_stage02.py env 2>&1 | tee ~/stage02-env.log
 
 # 2. DMTCP prerequisites. APPROVAL: system packages (skip any that are already installed)
 sudo apt install git gcc g++ make python3
@@ -240,8 +256,8 @@ bash experiments/stage02/build-dmtcp.sh 2>&1 | tee ~/stage02-build-dmtcp.log
 # 4. DMTCP same-boot trial, then the class matrix.
 #    CURRENTLY REFUSED by the harness (BLOCKED, I-1a / OD-13): no coordinator is started.
 #    These become runnable only after OD-13 is resolved and approved.
-python3 experiments/stage02/run_stage02.py trial --backend dmtcp --class c-single 2>&1 | tee ~/stage02-dmtcp-single.log
-python3 experiments/stage02/run_stage02.py matrix --backend dmtcp 2>&1 | tee ~/stage02-dmtcp-matrix.log
+python3 -I experiments/stage02/run_stage02.py trial --backend dmtcp --class c-single 2>&1 | tee ~/stage02-dmtcp-single.log
+python3 -I experiments/stage02/run_stage02.py matrix --backend dmtcp 2>&1 | tee ~/stage02-dmtcp-matrix.log
 
 # 5. CRIU build dependencies. APPROVAL: system packages
 sudo apt install build-essential git pkg-config libprotobuf-dev libprotobuf-c-dev \
@@ -250,14 +266,14 @@ sudo apt install build-essential git pkg-config libprotobuf-dev libprotobuf-c-de
 bash experiments/stage02/build-criu.sh 2>&1 | tee ~/stage02-build-criu.log
 
 # 6. CRIU as an ordinary user, with no capabilities. Expected: BLOCKED (records why)
-python3 experiments/stage02/run_stage02.py trial --backend criu --class c-single 2>&1 | tee ~/stage02-criu-user.log
+python3 -I experiments/stage02/run_stage02.py trial --backend criu --class c-single 2>&1 | tee ~/stage02-criu-user.log
 
 # 7. Optional CRIU diagnostics. APPROVAL each; see section I before deciding
 #   7a capability grant to the one user-owned binary:
 #      sudo setcap cap_checkpoint_restore,cap_sys_ptrace+ep ~/.local/opt/napguard-stage02/criu-4.2.1/sbin/criu
-#      python3 experiments/stage02/run_stage02.py matrix --backend criu
+#      python3 -I experiments/stage02/run_stage02.py matrix --backend criu
 #   7b root diagnostic (does not match the user-level model):
-#      sudo -v && python3 experiments/stage02/run_stage02.py --criu-mode sudo matrix --backend criu
+#      sudo -v && python3 -I experiments/stage02/run_stage02.py --criu-mode sudo matrix --backend criu
 
 # 8. Reboot recovery: section J
 
@@ -292,7 +308,9 @@ Status on Ubuntu 24.04 aarch64 (UTM): every execution cell is **NOT RUN**.
 | # | Finding | Consequence for NapGuard |
 |---|---|---|
 | I-1 | The DMTCP standalone coordinator listens on all interfaces with no authentication found [B11]. (`--no-coordinator`, mentioned below, turned out not to exist in v4.2.0; see I-1a.) | Production must not expose it. Options to evaluate in Stage 03 (OD-13): a firewall rule (system change, needs approval); `--no-coordinator` mode (single-process only); a network namespace (may be blocked by Ubuntu's AppArmor restriction on unprivileged user namespaces, which `env` records); a patched or newer coordinator. The harness records `ss -ltn` for each coordinator port as evidence. |
-| I-1a | **Stage 02 review result:** no supported option restricts DMTCP 4.2.0's coordinator to loopback. Both the standalone coordinator (`dmtcp_coordinator.cpp:1745`) and the one `dmtcp_launch` starts (`coordinatorapi.cpp:490`) bind `JSockAddr::ANY` (INADDR_ANY), on the v4.2.0 tag and on `main`. There is no bind-address option. `--no-coordinator` was removed (only a stale comment and `INSTALL.md` mention it). The one other path is an undocumented internal one: a pre-opened listener handed over on the internal descriptor `PROTECTED_COORD_FD`. | **The harness refuses to start any DMTCP coordinator.** `probe()` reports BLOCKED. `launch()` and `restore()` raise before spawning anything, and a unit test checks that nothing is spawned. `--join-coordinator` keeps `dmtcp_launch` and `dmtcp_restart` from starting a coordinator themselves. Building DMTCP and `dmtcp_launch --version` start no coordinator (`--version` exits during argument parsing, `dmtcp_launch.cpp:237–239`). `build-dmtcp.sh` refuses `make check`, because DMTCP's own tests start coordinators. If a loopback mechanism is approved later, the harness also checks after start that every listener of the coordinator port is loopback (`listeners_loopback_only`) and kills the coordinator otherwise. Candidate resolutions for OD-13, each needing review and approval: (1) a loopback-only network namespace for coordinator plus workload, if unprivileged user namespaces work under Ubuntu 24.04's AppArmor restriction (unverified); (2) a reviewed local patch, or use of the `PROTECTED_COORD_FD` mechanism with a NapGuard-created 127.0.0.1 listener (relies on an undocumented interface; needs an ADR); (3) a host firewall rule for the coordinator port (system change); (4) asking upstream for a bind-address option. |
+| I-1a | **Stage 02 review result (first pass):** no supported option restricts DMTCP 4.2.0's coordinator to loopback. Both the standalone coordinator (`dmtcp_coordinator.cpp:1745`) and the one `dmtcp_launch` starts (`coordinatorapi.cpp:490`) bind `JSockAddr::ANY` (INADDR_ANY), on the v4.2.0 tag and on `main`. There is no bind-address option. `--no-coordinator` was removed (only a stale comment and `INSTALL.md` mention it). The one other path is an undocumented internal one: a pre-opened listener handed over on the internal descriptor `PROTECTED_COORD_FD`. | **The harness refuses to start any DMTCP coordinator.** `probe()` reports BLOCKED. `launch()` and `restore()` raise before spawning anything, and a unit test checks that nothing is spawned. `--join-coordinator` keeps `dmtcp_launch` and `dmtcp_restart` from starting a coordinator themselves. Building DMTCP and `dmtcp_launch --version` start no coordinator (`--version` exits during argument parsing, `dmtcp_launch.cpp:237–239`). `build-dmtcp.sh` refuses `make check`, because DMTCP's own tests start coordinators. Candidate resolutions for OD-13, each needing review and approval: (1) a loopback-only network namespace for coordinator plus workload, if unprivileged user namespaces work under Ubuntu 24.04's AppArmor restriction (unverified); (2) a reviewed local patch, or use of the `PROTECTED_COORD_FD` mechanism with a NapGuard-created 127.0.0.1 listener (relies on an undocumented interface; needs an ADR); (3) a host firewall rule for the coordinator port (system change); (4) asking upstream for a bind-address option. |
+| I-1b | **Isolation investigation (follow-up, see section N).** Unprivileged network namespaces are expected to fail under `apparmor_restrict_unprivileged_userns=1` [HYP; the `env` probe now records it]. The narrow alternative is DMTCP's own listener hand-off: a 127.0.0.1 listener pre-bound by the harness and passed on fd 821. It is implemented to fail closed and is exercised only by `dmtcp-isolation-check`. | **Trial gate still closed.** `DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED = False` until `dmtcp-isolation-check` passes on Ubuntu and the approach is approved by ADR. |
+| I-1c | **Second DMTCP exposure path:** at restart, if the restored process had IPv4 sockets, the socket plugin opens a temporary restore listener on `INADDR_ANY` (`plugin/ipc/socket/connectionrewirer.cpp:192`). | The Stage 02 classes have no sockets, and the `tcp` class stays unimplemented. The trial network guard (section N) aborts and kills everything if any experiment process listens beyond loopback after launch, checkpoint, or restore. |
 | I-2 | Non-root CRIU needs `CAP_SYS_PTRACE` (under `ptrace_scope=1`) and `CAP_CHECKPOINT_RESTORE` on its binary [C5]. Anyone able to execute that binary could ptrace and dump processes of **any** user, so this is effectively root-equivalent. | It conflicts with SEC-010. Adopting it needs an ADR, explicit approval, and an execute-restricted binary (0750, in a 0700 directory). Recommended only for diagnostics. |
 | I-3 | `ptrace_scope` stays at the Ubuntu default. Nothing in Stage 02 changes it. | DMTCP is expected to be unaffected (B9). CRIU is affected. |
 | I-4 | A checkpoint image is executable process state. Restoring a modified image runs attacker-chosen code as the user. | Restore only images whose recorded hashes match (SEC-007). `reboot-resume` refuses to restore on any SHA-256 mismatch. |
@@ -307,7 +325,7 @@ Status on Ubuntu 24.04 aarch64 (UTM): every execution cell is **NOT RUN**.
 1. Choose the backend that passed its same-boot trial, for example DMTCP:
 
    ```sh
-   python3 experiments/stage02/run_stage02.py reboot-prepare --backend dmtcp --class c-single 2>&1 | tee ~/stage02-reboot-prepare.log
+   python3 -I experiments/stage02/run_stage02.py reboot-prepare --backend dmtcp --class c-single 2>&1 | tee ~/stage02-reboot-prepare.log
    ```
 
    This step:
@@ -323,7 +341,7 @@ Status on Ubuntu 24.04 aarch64 (UTM): every execution cell is **NOT RUN**.
 
    ```sh
    cd ~/napguard
-   python3 experiments/stage02/run_stage02.py reboot-resume --run-dir <dir printed in step 1> 2>&1 | tee ~/stage02-reboot-resume.log
+   python3 -I experiments/stage02/run_stage02.py reboot-resume --run-dir <dir printed in step 1> 2>&1 | tee ~/stage02-reboot-resume.log
    ```
 
    The result is PASS only if all of these hold:
@@ -338,7 +356,7 @@ For CRIU, a cross-reboot restore may fail if the original PID is in use after bo
 
 | # | Blocker | Resolution |
 |---|---|---|
-| K-0 | **DMTCP trials are refused by the harness** (I-1a): no supported loopback-only coordinator. | Decide OD-13. Until then, DMTCP can be built and its version recorded, but not run. |
+| K-0 | **DMTCP trials are refused by the harness** (I-1a): no supported loopback-only coordinator option. | The loopback fd hand-off (section N) needs: DMTCP built, `dmtcp-isolation-check` PASS on Ubuntu, then an ADR plus approval to open the trial gate. Until then, DMTCP can be built and checked, but no trial runs. |
 | K-1 | No backend is installed on the VM, and neither has an APT candidate. | DMTCP: source build (G step 3), which needs compilers (APPROVAL for `apt install`). CRIU: source build or PPA (APPROVAL). |
 | K-2 | CRIU cannot run as an ordinary user without a privileged capability grant [C5, I-2]. | Decision OD-14: grant capabilities (with an ADR), run a root diagnostic only, or set CRIU aside. |
 | K-3 | No Linux experiment has run, so every capability cell is NOT RUN. | Run section G. |
@@ -390,4 +408,68 @@ If none of these work, Stage 02 is BLOCKED and the target environment must be re
 
 | No DMTCP coordinator exposed on the network | harness refusal + `test_stage02_safety.py` | ENFORCED (refuses to start) |
 
-**Stage 02: BLOCKED pending OD-13 (DMTCP coordinator exposure) or OD-14 (CRIU privileges).** The preparation is complete and reviewed. The only steps that can run now are `env`, the builds, and the CRIU-as-user trial, which is expected to report BLOCKED. STOP: Stage 03 has not been started.
+**Stage 02: BLOCKED pending OD-13 (DMTCP coordinator exposure: hand-off mechanism implemented, not yet verified on Ubuntu) or OD-14 (CRIU privileges).** The preparation is complete and reviewed. The only steps that can run now are `env`, the builds, and the CRIU-as-user trial, which is expected to report BLOCKED. STOP: Stage 03 has not been started.
+
+## N. DMTCP coordinator isolation investigation (OD-13)
+
+Status: **mechanism implemented and fail-closed; not yet verified on Ubuntu; trial gate closed.**
+
+### Options evaluated
+
+| Option | Assessment |
+|---|---|
+| Unprivileged user + network namespace (`unshare -Urn`, `bwrap --unshare-net`, systemd `PrivateNetwork=`) | On Ubuntu 24.04 with `apparmor_restrict_unprivileged_userns=1` (confirmed on the VM), an unconfined unprivileged process may create a user namespace, but it is confined by AppArmor without capabilities inside it. So it cannot create or configure a network namespace (`lo` up needs `CAP_NET_ADMIN`) [HYP]. Making it work would need a root-installed AppArmor profile granting `userns` to a specific binary (a system change needing approval), or disabling the restriction (weakens security system-wide; refused). The `env` command now records `unshare` and `bwrap` probe results, which create and discard a namespace and change nothing, as evidence. |
+| Firewall rule | A system change. Refused under the current instructions. |
+| Patching DMTCP | A narrow change, but it modifies third-party code. It needs an ADR and must be re-applied on every upgrade. Kept as a fallback. |
+| **Loopback listener hand-off (implemented)** | DMTCP's coordinator first checks for an inherited listener on `PROTECTED_COORD_FD` (= 821; `include/protectedfds.h`) and uses it (`dmtcp_coordinator.cpp:1738-1742`). `dmtcp_launch --new-coordinator` uses exactly this hand-off internally (`coordinatorapi.cpp:490-508`), so it is DMTCP's own mechanism, but **not a documented user option**. |
+
+### How the hand-off is made fail-closed
+
+The steps below are in `ngexp/backends.py`, `Dmtcp._loopback_coordinator`.
+
+1. **Version pin.** The hand-off is used only if `dmtcp_launch --version` reports the analysed version 4.2.0.
+2. **Pre-bound listener.** The harness binds `127.0.0.1:0` and listens (no `SO_REUSEPORT`). Call the assigned port P.
+3. **Wildcard-bind probe.** Before starting anything, the harness checks that binding `0.0.0.0:P` fails with `EADDRINUSE`. On Linux, a listening socket on `127.0.0.1:P` conflicts with a wildcard bind on P. If the kernel allowed the bind, the harness refuses to continue.
+4. **Spawn with the same port.** The coordinator gets the listener as fd 821, with `--coord-port P`. If it ignored fd 821, it would fall back to `bind(INADDR_ANY:P)`, which fails, and the coordinator exits. The harness keeps its own copy of the listener open, so this holds even if the coordinator closed fd 821.
+5. **Port check.** The port file must equal P; otherwise the coordinator is killed and the step fails.
+6. **Post-start evidence.** `ss -H -l -n -p` must show only loopback listeners on P, and no non-loopback listener owned by the coordinator. TCP connects to every non-loopback IPv4 address of the VM on P must fail. Otherwise the coordinator is killed and the step fails.
+7. **Trial guard.** After launch, checkpoint, and restore, any non-loopback TCP or UDP listener owned by an experiment process aborts the trial and kills everything (this covers I-1c).
+
+Unit tests:
+
+- **Portable:** `ss` parsing, violation detection, the `--coord-port` value, and that the trial gate stays closed even when the hand-off works.
+- **Linux-only:** the wildcard bind is refused next to the loopback listener; a fake coordinator that uses fd 821 is confined; a fake coordinator that ignores fd 821 and tries `INADDR_ANY:P` **fails closed, with no exposed listener**.
+
+### Residual risks
+
+- **Undocumented interface.** The hand-off relies on an internal descriptor number. This is mitigated by the version pin and by fail-closed behaviour; it must be re-verified on any DMTCP upgrade.
+- **No local authentication.** Loopback confinement removes **network** exposure only. Any local user on the same machine can still connect to `127.0.0.1:P` and send commands, such as kill or checkpoint. This is acceptable for the single-user Stage 02 VM, but **not sufficient for NapGuard production on multi-user hosts** (SEC-002). Stage 03 needs a design for it, for example per-user network isolation through an approved mechanism, or upstream authentication.
+- **Restore-time listener (I-1c).** It is guarded, and TCP workloads stay excluded.
+
+### Commands (Ubuntu, after `build-dmtcp.sh`)
+
+```sh
+python3 -I experiments/stage02/run_stage02.py env 2>&1 | tee ~/stage02-env.log                          # includes netns probes
+python3 -I experiments/stage02/run_stage02.py dmtcp-isolation-check 2>&1 | tee ~/stage02-dmtcp-isolation.log
+```
+
+`dmtcp-isolation-check` starts one coordinator under the fail-closed hand-off, records the evidence, runs `dmtcp_command --status` over loopback, and stops the coordinator. It runs no workload and takes no checkpoint.
+
+### Recommendation
+
+1. Do not use network namespaces or firewall changes.
+2. Build DMTCP and run `dmtcp-isolation-check` on the VM.
+3. If it passes, record an ADR that approves the hand-off for **Stage 02 experiments only**, then open the trial gate with explicit approval.
+4. Treat local cross-user access to the coordinator as an open production requirement for Stage 03.
+
+### Review decision (2026-10-19)
+
+- **Approved:** commit and push of the import fixes, regression tests, documentation, and the experimental `dmtcp-isolation-check`.
+- **Not approved:** enabling DMTCP checkpoint trials, changing Ubuntu security settings, or treating loopback isolation as production-safe. `DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED` stays `False`. Unit tests check that the trial, matrix, and reboot-prepare entry points report BLOCKED and spawn nothing.
+
+Pre-commit hardening of the isolation probe (it now fails closed on audit errors):
+
+- If the listener audit cannot run (`ss` or `ip` missing, failing, or timing out), the coordinator is killed and the step fails. The trial network guard behaves the same way.
+- A failing `ip` command is an error, never an empty address list that would silently skip the external-connect test.
+- A spawn failure (for example fd 821 in use) is recorded as a FAIL, not raised as an unhandled exception.
+- The isolation audit runs once, inside the error handling.
