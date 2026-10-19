@@ -250,7 +250,8 @@ python3 -I experiments/stage02/run_stage02.py env 2>&1 | tee ~/stage02-env.log
 # 2. DMTCP prerequisites. APPROVAL: system packages (skip any that are already installed)
 sudo apt install git gcc g++ make python3
 
-# 3. DMTCP source build as the user (pinned v4.2.0; ~1 GiB disk, est. 5-20 min)
+# 3. DMTCP source build as the user (pinned v4.2.0; ~1 GiB disk). Default 2 parallel make jobs;
+#    override with NAPGUARD_STAGE02_BUILD_JOBS=<positive integer>. `--check-config` only validates.
 bash experiments/stage02/build-dmtcp.sh 2>&1 | tee ~/stage02-build-dmtcp.log
 
 # 4. DMTCP same-boot trial, then the class matrix.

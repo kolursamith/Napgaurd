@@ -282,3 +282,43 @@ def test_dmtcp_trial_matrix_and_reboot_gates_stay_closed(tmp_path: Path, entry: 
     for commands in opts.run_root.glob("*/commands.jsonl"):
         assert '"kind": "spawn"' not in commands.read_text(encoding="utf-8")
     assert not list(opts.run_root.glob("*/reboot-manifest.json"))
+
+
+BUILD_DMTCP = Path(__file__).resolve().parents[2] / "experiments" / "stage02" / "build-dmtcp.sh"
+
+
+def run_build_script(tmp_path: Path, jobs: str | None, *args: str) -> subprocess.CompletedProcess[str]:
+    # Only invalid settings or --check-config are used: both exit before any clone or build.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("NAPGUARD_STAGE02_")}
+    env.update(NAPGUARD_STAGE02_SRC=str(tmp_path / "src"),
+               NAPGUARD_STAGE02_PREFIX=str(tmp_path / "prefix"))
+    if jobs is not None:
+        env["NAPGUARD_STAGE02_BUILD_JOBS"] = jobs
+    return subprocess.run(["bash", str(BUILD_DMTCP), *args], env=env, capture_output=True,
+                          text=True, timeout=30)
+
+
+@pytest.mark.parametrize("jobs", ["0", "-1", "abc", "1.5", "2 ", " 2", "02", "2;id", "$(id)"])
+def test_build_jobs_rejects_invalid_values_before_doing_anything(tmp_path: Path, jobs: str) -> None:
+    done = run_build_script(tmp_path, jobs)
+    assert done.returncode == 2
+    assert "must be a positive integer" in done.stderr
+    assert done.stderr.rstrip().endswith("'")  # the exit code is not echoed into the message
+    assert not (tmp_path / "src").exists() and not (tmp_path / "prefix").exists()
+
+
+@pytest.mark.parametrize(("jobs", "expected"), [(None, "jobs=2"), ("1", "jobs=1"), ("6", "jobs=6")])
+def test_build_jobs_default_and_valid_values(tmp_path: Path, jobs: str | None,
+                                             expected: str) -> None:
+    done = run_build_script(tmp_path, jobs, "--check-config")
+    assert done.returncode == 0, done.stderr
+    assert expected in done.stdout.split()
+    assert "commit=f8009ce7b4ad211311ca2f72a929b975e4aa1155" in done.stdout
+    assert not (tmp_path / "src").exists() and not (tmp_path / "prefix").exists()
+
+
+def test_build_script_uses_bounded_jobs_and_rejects_unknown_arguments(tmp_path: Path) -> None:
+    text = BUILD_DMTCP.read_text(encoding="utf-8")
+    assert 'make -j"$JOBS"' in text and 'make -j"$(nproc)"' not in text
+    done = run_build_script(tmp_path, None, "--build-now")
+    assert done.returncode == 2 and "unknown argument" in done.stderr
