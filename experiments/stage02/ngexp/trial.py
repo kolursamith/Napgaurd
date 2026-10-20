@@ -35,11 +35,13 @@ from .backends import (
     AMENDMENT_2_CLASSES,
     CONTROLLED_TRIAL_CLASSES,
     NEVER_UNDER_ADR_0004,
+    ONE_TIME_RETESTS,
     Backend,
     BackendStepError,
     Criu,
     Dmtcp,
     Session,
+    restart_failure_facts,
     workload_socket_fds,
 )
 from .results import Check, Status, overall
@@ -354,7 +356,35 @@ def controlled_trial_refusal(opts: Options, entry: str) -> str | None:
                    if opts.workload_class in AMENDMENT_2_CLASSES else "")
         return (f"class {opts.workload_class!r} is not allowed under ADR 0004 for `{entry}`"
                 f"{pending} (allowed: {', '.join(allowed)})")
+    expected = ONE_TIME_RETESTS.get(opts.workload_class)
+    if expected is not None:  # Amendment 3: exactly one retest, after the preserved original
+        prior = launched_controlled_runs(opts.run_root, opts.workload_class)
+        if len(prior) < expected:
+            return (f"the one-time {opts.workload_class!r} retest (ADR 0004 Amendment 3) needs the "
+                    f"original failed run in {opts.run_root}; found {len(prior)} launched run(s)")
+        if len(prior) > expected:
+            return (f"the one-time {opts.workload_class!r} retest (ADR 0004 Amendment 3) has "
+                    f"already been used: {len(prior)} launched runs ({', '.join(prior)})")
     return None
+
+
+def launched_controlled_runs(run_root: Path, workload_class: str) -> list[str]:
+    """Earlier DMTCP runs of this class that launched a workload (each used an approval)."""
+    runs = []
+    for run_dir in sorted(run_root.glob(f"*-dmtcp-{workload_class}-*")):
+        commands = run_dir / "commands.jsonl"
+        if not commands.is_file():
+            continue
+        for line in commands.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if (isinstance(record, dict) and record.get("kind") == "spawn"
+                    and record.get("name") == "dmtcp-launch"):
+                runs.append(run_dir.name)
+                break
+    return runs
 
 
 def check_controlled_workload(state: TrialState, session: Session) -> None:
@@ -410,6 +440,7 @@ def restore_and_verify(state: TrialState, opts: Options, wc: WorkloadClass, back
         restored = model.read_reports(report, kill_line)
         state.add(Check("restored workload reporting", Status.FAIL,
                         f"{len(restored)} observations within 30 s of restore"))
+        record_restore_diagnostics(state, backend, session)
         return
     adopt_reported(state, backend, model.read_reports(report, kill_line), "restored", restore_at)
     guard_network(state, "restore")
@@ -435,6 +466,16 @@ def restore_and_verify(state: TrialState, opts: Options, wc: WorkloadClass, back
             restored=restored, original_dead=bool(marks["original_dead"]),
             ballast_mib=wc.ballast_mib,
         ))
+    record_restore_diagnostics(state, backend, session)
+
+
+def record_restore_diagnostics(state: TrialState, backend: Backend,
+                               session: Session | None) -> None:
+    """Diagnostic facts only, never a check: how the DMTCP restarter (which becomes the
+    restored process) stands, including a late exit after the 1 s start check. Reaps nothing."""
+    if isinstance(backend, Dmtcp) and session is not None and session.helpers:
+        state.facts["restore_process_diagnostics"] = restart_failure_facts(
+            session.workload, session.helpers[0])
 
 
 def finish(state: TrialState, backend: Backend) -> None:
@@ -493,6 +534,11 @@ def prelude(opts: Options, label: str,
         return write_result(state, opts, entry)
     if opts.dmtcp_controlled_trial:
         state.facts["adr_0004_controlled_trial"] = True
+        if opts.workload_class in ONE_TIME_RETESTS:
+            state.facts["one_time_retest"] = {
+                "approval": "ADR 0004 Amendment 3 (owner, 2026-10-20)",
+                "earlier_launched_runs": launched_controlled_runs(opts.run_root,
+                                                                  opts.workload_class)}
     if wc.kind == "none":
         state.add(Check("workload class", Status.SKIP, wc.note))
         return write_result(state, opts, "trial")

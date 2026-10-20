@@ -865,3 +865,43 @@ Runs from before this commit stored the upper bound under the name `restore_to_f
   - per-phase result preservation.
 
 **Status:** the project owner **approved** ADR 0004 Amendment 2 on 2026-10-20 (one same-boot trial per class). `AMENDMENT_2_APPROVED = True` and the pinned tests were updated in the commit after `22175d3a`. **No Amendment 2 class has been run yet; none is claimed to pass.** The base exception (`c-single`), the global gate (`False`), the DMTCP 4.2.0 pin, and the prohibitions on `c-child`, `tcp`, `gui`, and cross-reboot runs of these classes are unchanged. The Ubuntu script's security-test step now runs all Stage 02 test modules (safety, launch config, classes, reboot, ckptwait), with zero skips allowed.
+
+## AA. Amendment 2 results so far, the `py` restore failure, and Amendment 3 (APPROVED 2026-10-20, NOT YET RUN)
+
+This section supersedes the `c-threads` and `py` rows of the section X matrix. Those rows are kept unchanged as history.
+
+**Amendment 2 trials at `52e5baed59af16b34ccd6ed47cf4037d32e70f07`** (Ubuntu 24.04.5 ARM64, Python 3.12.3, DMTCP 4.2.0; user-reported):
+
+| Class | Verdict | Evidence |
+|---|---|---|
+| `c-threads` | **PASS** (same boot) | user-reported; figures not yet transcribed here |
+| `py` | **FAIL** (restore) | checkpoint verified: 43,099,292 bytes in 1.19 s; original terminated; then `restore command started` FAIL: `dmtcp_restart exited within 1 s` |
+| `c-file-static`, `c-file-grow` | NOT TESTED | awaiting their Amendment 2 runs |
+
+**This `py` failure is a recorded Stage 02 FAIL.** It stays recorded whatever any retest shows.
+
+**Analysis (Mac, read-only; root cause NOT established):**
+
+- **The `setsid()` warning is incidental.** The restart log contained `JWARNING(setsid() != -1) failed … Operation not permitted … Failed to restore this process as session leader.` In DMTCP 4.2.0 this is a `JWARNING` in `RestoreTarget::createProcess` (`dmtcprestartinternal.cpp:323-329`): it logs and continues to `runMtcpRestart`.
+  - The harness spawns `dmtcp_restart` with `start_new_session=True`, so the restarter already leads its own session and `setsid()` must fail with EPERM, for every class.
+  - The owner confirmed the same warning in the passing C workloads.
+- **Launch and restore paths are identical** for C and Python: same own-session spawn, same restart argv, same loopback hand-off coordinator. They differ in the program (`/usr/bin/python3` versus `ngcounter`) and in image size (43 MB versus about 25 MB).
+- **The restarter becomes the restored process** (`dmtcp_restart` execs `mtcp_restart` in place). An early exit therefore means one of three things: the restarter failed, the image crashed during restore, or the restored interpreter ran and exited.
+- **Missing evidence (now captured, commit `7d3b4c9090e313cca7f3a06faf40b992cdea47b1`).** The failed check kept only keyword-filtered log lines. These surfaced the warning, which matches "error" via `strerror`, and could hide the fatal line. They also omitted the exit code or signal.
+- **Owner's read-only Ubuntu diagnostics:** no kernel events in the failure window; about 2.7 GiB available RAM; about 3.8 GiB available swap; overcommit mode 0; the checkpoint artifacts preserved.
+
+**Amendment 3 (ADR 0004): one-time owner approval, 2026-10-20.** It allows exactly one additional same-boot `py` diagnostic retest. Every ADR 0004 and Amendment 2 condition is unchanged. The harness enforces it:
+
+- `backends.ONE_TIME_RETESTS = {"py": 1}`. A controlled `py` trial is refused (BLOCKED) unless exactly one earlier `py` run that launched a workload, the preserved original, exists in the run root.
+- After the retest has launched, every further `py` trial is refused. Refused or BLOCKED runs that never launched a workload are not counted.
+- The result records `one_time_retest.earlier_launched_runs`.
+- `reboot-*`, `matrix`, `c-child`, `tcp` and `gui` stay refused.
+- **Diagnostics on any restore outcome:**
+  - `restore command started` FAIL facts: `restarter_exit` (exit code, or signal plus core flag, read with `waitid(WNOWAIT)`, so nothing is reaped), `restarter_stderr_tail` (60 lines, unfiltered), `restarter_stdout_tail`, and `restore_coordinator_tail`;
+  - `reports_after_kill_at_restore_fail`;
+  - `restore_process_diagnostics` after the restore has started, including a restarter that dies later than the 1 s start check.
+- **Tests:** `tests/unit/test_stage02_restore_diagnostics.py` (18 tests). The Ubuntu script now includes it in its zero-skip security-test step.
+
+**Unchanged:** `DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED = False`, `CONTROLLED_TRIAL_CLASSES = ("c-single",)`, the fd-821 loopback-only hand-off, the DMTCP 4.2.0 pin, the Python workload, and the success path for `c-single` and `c-threads` (only diagnostic facts were added).
+
+**Status:** approved, **not yet run**. No `py` restore is claimed to work.

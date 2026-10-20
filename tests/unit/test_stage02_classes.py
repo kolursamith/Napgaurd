@@ -39,10 +39,21 @@ def snap(size: int, sha: str) -> dict[str, object]:
 # ------------------------------------------------------------------ ADR 0004 scope
 
 
+def seed_launched_run(run_root: Path, cls: str, stamp: str = "20261020T000000Z") -> Path:
+    """A run directory that launched a DMTCP workload (as the first, failed py trial did)."""
+    run_dir = run_root / f"{stamp}-dmtcp-{cls}-0000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "commands.jsonl").write_text(
+        json.dumps({"kind": "spawn", "name": "dmtcp-launch"}) + "\n", encoding="utf-8")
+    return run_dir
+
+
 @pytest.mark.parametrize("cls", AMENDMENT_2)
 def test_amendment_2_classes_are_allowed_for_same_boot_trial_only(tmp_path: Path,
                                                                  cls: str) -> None:
     assert cls not in backends.CONTROLLED_TRIAL_CLASSES  # not part of the base exception
+    if cls in backends.ONE_TIME_RETESTS:  # py: the preserved original run (Amendment 3)
+        seed_launched_run(tmp_path, cls)
     opts = trial.Options(backend="dmtcp", workload_class=cls, run_root=tmp_path,
                          dmtcp_controlled_trial=True)
     assert trial.controlled_trial_refusal(opts, "trial") is None  # Amendment 2 (approved)
@@ -222,6 +233,7 @@ def test_without_approval_the_refusal_names_the_pending_amendment(
 def test_when_approved_amendment_2_is_same_boot_trial_only(tmp_path: Path,
                                                            monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(backends, "AMENDMENT_2_APPROVED", True)
+    seed_launched_run(tmp_path, "py")  # Amendment 3 needs the preserved original py run
     for cls in AMENDMENT_2:
         opts = trial.Options(backend="dmtcp", workload_class=cls, run_root=tmp_path,
                              dmtcp_controlled_trial=True)

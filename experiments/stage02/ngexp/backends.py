@@ -123,6 +123,12 @@ AMENDMENT_2_CLASSES = ("c-threads", "py", "c-file-static", "c-file-grow")
 AMENDMENT_2_APPROVED = True
 # Never runnable under ADR 0004, whatever is approved: multi-process, sockets (I-1c), GUI.
 NEVER_UNDER_ADR_0004 = ("c-child", "tcp", "gui")
+# ADR 0004 Amendment 3: a separate, ONE-TIME owner approval (2026-10-20) for exactly one
+# additional same-boot `py` DIAGNOSTIC retest after the first py restore failed (52e5bae).
+# Value = launched controlled runs of the class that must ALREADY exist in the run root:
+# the retest needs the preserved original failed run there, and is refused once any
+# further py run has launched a workload.
+ONE_TIME_RETESTS = {"py": 1}
 
 
 def workload_socket_fds(pid: int) -> list[tuple[int, str]]:

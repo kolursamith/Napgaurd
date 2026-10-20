@@ -1,7 +1,7 @@
 # ADR 0004: Stage 02-Only DMTCP Coordinator Exception via a Pre-Bound Loopback Listener
 
-- Status: **Accepted (limited)** for the same-boot `c-single` diagnostic, which was executed on 2026-10-20 at commit `f0f6599976f5a7fdeefd8f51413821c5d2606516` with the user's approval. **Amendment 1 (cross-reboot `c-single`) is Accepted (limited)**: approved by the user and executed once on 2026-10-20 at commit `55905be43fcf67ad1effd2dd5d17e5d1b6c57867`, VERIFIED PASS (Stage 02 report section W). **Amendment 2 (four more classes, same boot) is Approved (limited)** by the project owner on 2026-10-20: exactly one same-boot trial each for `c-threads`, `py`, `c-file-static`, and `c-file-grow`, on the single-user Ubuntu 24.04 ARM64 UTM VM only. Not yet executed.
-- Amended: 2026-10-20 (scope split; Amendment 1)
+- Status: **Accepted (limited)** for the same-boot `c-single` diagnostic, which was executed on 2026-10-20 at commit `f0f6599976f5a7fdeefd8f51413821c5d2606516` with the user's approval. **Amendment 1 (cross-reboot `c-single`) is Accepted (limited)**: approved by the user and executed once on 2026-10-20 at commit `55905be43fcf67ad1effd2dd5d17e5d1b6c57867`, VERIFIED PASS (Stage 02 report section W). **Amendment 2 (four more classes, same boot) is Approved (limited)** by the project owner on 2026-10-20: exactly one same-boot trial each for `c-threads`, `py`, `c-file-static`, and `c-file-grow`, on the single-user Ubuntu 24.04 ARM64 UTM VM only. Executed so far at `52e5baed59af16b34ccd6ed47cf4037d32e70f07`: `c-threads` PASS (user-reported) and `py` **FAIL** (restore). **Amendment 3 (one `py` diagnostic retest, same boot) is Approved (limited)** by the project owner on 2026-10-20 as a separate, one-time approval. Not yet executed.
+- Amended: 2026-10-20 (scope split; Amendment 1; Amendment 2; Amendment 3)
 - Date: 2026-10-19
 - Scope: **Stage 02 feasibility experiments only.** It does not apply to NapGuard production (Stages 03–12).
 - Related: [Stage 02 report](../phases/STAGE-02-report.md) (I-1, I-1a, I-1b, I-1c, section N), [backend contract](../architecture/checkpoint-backend.md), [IPC and security](../architecture/ipc-security.md)
@@ -13,8 +13,9 @@
 |---|---|---|
 | **Approved** | executed once; **VERIFIED PASS** (Stage 02 report section T) | `trial --backend dmtcp --class c-single --adr-0004-controlled-trial`: a same-boot checkpoint/restore diagnostic under every condition below |
 | **Approved (Amendment 1)** | executed once; **VERIFIED PASS** (Stage 02 report section W) | `reboot-prepare` and `reboot-resume` with `--backend dmtcp --class c-single --adr-0004-controlled-trial`, with the extra conditions in "Amendment 1" |
-| **Approved (Amendment 2)** | approved by the project owner on 2026-10-20; **not yet executed** | exactly one same-boot `trial` each for `c-threads`, `py`, `c-file-static`, `c-file-grow` (see "Amendment 2"); `AMENDMENT_2_APPROVED = True` |
-| **Prohibited** | refused by the harness or by this ADR | production use (any NapGuard daemon, CLI, or GUI outside `experiments/stage02`); TCP or any socket-holding workload; multi-user hosts or use by anyone other than the single VM user; `c-child`, `tcp`, and `gui`; **cross-reboot runs of the Amendment 2 classes**; more than one trial per Amendment 2 class without a new approval; `matrix`; CRIU under this exception; any DMTCP version other than 4.2.0 |
+| **Approved (Amendment 2)** | approved by the project owner on 2026-10-20; `c-threads` PASS (user-reported), `py` **FAIL** (restore), `c-file-static` and `c-file-grow` not yet executed | exactly one same-boot `trial` each for `c-threads`, `py`, `c-file-static`, `c-file-grow` (see "Amendment 2"); `AMENDMENT_2_APPROVED = True` |
+| **Approved (Amendment 3)** | approved by the project owner on 2026-10-20 as a one-time decision; **not yet executed** | exactly **one** additional same-boot `trial --class py` diagnostic retest; enforced by `backends.ONE_TIME_RETESTS = {"py": 1}` (see "Amendment 3") |
+| **Prohibited** | refused by the harness or by this ADR | production use (any NapGuard daemon, CLI, or GUI outside `experiments/stage02`); TCP or any socket-holding workload; multi-user hosts or use by anyone other than the single VM user; `c-child`, `tcp`, and `gui`; **cross-reboot runs of the Amendment 2 classes**; more than one trial per Amendment 2 class without a new approval (for `py`: more than the one Amendment 3 retest); `matrix`; CRIU under this exception; any DMTCP version other than 4.2.0 |
 
 ## Context
 
@@ -114,6 +115,23 @@ These are in addition to conditions 1–11 above, which apply to both phases.
 
 - sets `backends.AMENDMENT_2_APPROVED = True`, which allows the four classes for same-boot `trial` only;
 - updates the pinned tests (`test_amendment_2_flag_is_pinned_off`, `test_only_c_single_is_authorised`, `test_amendment_2_classes_are_still_refused`).
+
+## Amendment 3: one `py` diagnostic retest, same boot (APPROVED 2026-10-20, one-time)
+
+**Background.** The Amendment 2 `py` trial at `52e5baed59af16b34ccd6ed47cf4037d32e70f07` created a verified checkpoint (43,099,292 bytes, 1.19 s) and terminated the original. The restore then **failed**: `dmtcp_restart` exited within 1 s. The root cause is unknown. The `setsid()` JWARNING in the restart log is non-fatal in DMTCP 4.2.0 (`dmtcprestartinternal.cpp:323-329`) and also occurs for the passing C classes, so it is not considered the cause (Stage 02 report section AA). The owner's read-only diagnostics found no kernel events in the failure window, about 2.7 GiB available RAM, about 3.8 GiB available swap, overcommit mode 0, and the checkpoint artifacts preserved.
+
+**Owner decision (2026-10-20):** a separate, one-time approval for **exactly one additional same-boot `py` checkpoint/restore diagnostic trial** on the isolated single-user Ubuntu 24.04 ARM64 UTM VM.
+
+**Conditions:** every ADR 0004 condition (1–11) and every Amendment 2 condition stay mandatory, unchanged. In addition:
+
+- **The original failure stays recorded as a FAIL**, even if the retest passes. Its run directory and evidence are preserved, not deleted or overwritten.
+- **Exactly one retest, enforced by the harness.** A controlled `py` trial is refused (BLOCKED) unless the run root contains exactly one earlier `py` run that launched a workload: the preserved original. Once the retest has launched, any further `py` trial is refused. A run that was refused or BLOCKED before launching a workload does not count.
+- **Diagnostics captured** on any restore outcome: the restarter's exit code or signal (read without reaping it), unfiltered restarter stderr and stdout tails, the restore coordinator log tail, and any workload reports written after termination.
+- The Python workload is not modified to force a PASS. DMTCP stays 4.2.0 at its pinned source revision.
+
+**Explicitly excluded:** cross-reboot `py` runs, a second retest, `c-child`, `tcp`, `gui`, `matrix`, CRIU, sudo, capabilities, firewall or kernel tuning, and any change to the production gate (`DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED = False`) or to loopback-only isolation.
+
+**A PASS of the retest would show** that DMTCP 4.2.0 can restore the `py` class on this VM, and would make the original failure intermittent or environmental, which must be reported as such. **A FAIL** is recorded with its diagnostics; any further `py` attempt needs a new approval.
 
 ## Consequences
 

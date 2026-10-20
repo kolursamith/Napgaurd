@@ -13,6 +13,7 @@ No checkpoint or restore is run here. The tests pin down two things:
 from __future__ import annotations
 
 import inspect
+import json
 import signal
 import subprocess
 import sys
@@ -182,3 +183,105 @@ def test_restore_failure_records_reports_written_after_termination(
     assert late["count"] == len(restored)
     assert (late["first"]["counter"] if restored else late["first"]) == (
         restored[0] if restored else None)
+
+
+# ------------------------------- ADR 0004 Amendment 3: exactly one py diagnostic retest
+
+
+def seed_run(run_root: Path, cls: str, stamp: str, *, launched: bool) -> Path:
+    run_dir = run_root / f"{stamp}-dmtcp-{cls}-abcd"
+    run_dir.mkdir(parents=True)
+    records = [{"kind": "run", "name": "build"}]
+    if launched:
+        records.append({"kind": "spawn", "name": "dmtcp-launch"})
+    (run_dir / "commands.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\nnot json\n", encoding="utf-8")
+    return run_dir
+
+
+def py_opts(run_root: Path) -> trial.Options:
+    return trial.Options(backend="dmtcp", workload_class="py", run_root=run_root,
+                         dmtcp_controlled_trial=True)
+
+
+def test_amendment_3_is_one_retest_of_py_only() -> None:
+    assert backends.ONE_TIME_RETESTS == {"py": 1}
+    assert backends.DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED is False  # production gate
+    assert backends.CONTROLLED_TRIAL_CLASSES == ("c-single",)
+    assert set(backends.NEVER_UNDER_ADR_0004) == {"c-child", "tcp", "gui"}
+
+
+def test_py_retest_refused_without_the_preserved_original_run(tmp_path: Path) -> None:
+    seed_run(tmp_path, "py", "20261020T100000Z", launched=False)  # refused/blocked: no launch
+    refusal = trial.controlled_trial_refusal(py_opts(tmp_path), "trial")
+    assert refusal is not None and "needs the original failed run" in refusal
+
+
+def test_py_retest_allowed_exactly_once_after_the_original(tmp_path: Path) -> None:
+    seed_run(tmp_path, "py", "20261020T100000Z", launched=True)  # the original failed trial
+    seed_run(tmp_path, "py", "20261020T110000Z", launched=False)  # a BLOCKED attempt
+    seed_run(tmp_path, "c-threads", "20261020T090000Z", launched=True)  # another class
+    assert trial.launched_controlled_runs(tmp_path, "py") == ["20261020T100000Z-dmtcp-py-abcd"]
+    assert trial.controlled_trial_refusal(py_opts(tmp_path), "trial") is None
+    seed_run(tmp_path, "py", "20261020T120000Z", launched=True)  # the retest launched
+    refusal = trial.controlled_trial_refusal(py_opts(tmp_path), "trial")
+    assert refusal is not None and "already been used: 2 launched runs" in refusal
+
+
+@pytest.mark.parametrize("entry", ["reboot-prepare", "reboot-resume", "matrix"])
+def test_py_retest_is_same_boot_trial_only(tmp_path: Path, entry: str) -> None:
+    seed_run(tmp_path, "py", "20261020T100000Z", launched=True)
+    assert trial.controlled_trial_refusal(py_opts(tmp_path), entry) is not None
+
+
+def test_other_classes_are_not_counted(tmp_path: Path) -> None:
+    for stamp in ("20261020T100000Z", "20261020T110000Z"):
+        seed_run(tmp_path, "c-single", stamp, launched=True)
+    opts = trial.Options(backend="dmtcp", workload_class="c-single", run_root=tmp_path,
+                         dmtcp_controlled_trial=True)
+    assert trial.controlled_trial_refusal(opts, "trial") is None  # c-single unchanged
+
+
+# ------------------------- restore diagnostics after the 1 s start check (late exit)
+
+
+class StartedRestoreBackend(FailingRestoreBackend):
+    def __init__(self, restarter: runner.Tracked, coord: runner.Tracked) -> None:
+        super().__init__()
+        self.session = Session(restarter, [coord])
+
+    def restore(self, images: Sequence[Path],
+                not_before_ticks: int) -> tuple[Check, Session | None]:
+        return Check("restore command started", Status.PASS, "fake"), self.session
+
+
+def test_late_restarter_exit_is_recorded_when_no_reports_arrive(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_dir = tmp_path / "run"
+    (run_dir / "reports").mkdir(parents=True)
+    original = [ngstate(c) for c in (0, 20, 40, 450)]
+    (run_dir / "reports" / "managed.txt").write_text("\n".join(original) + "\n",
+                                                     encoding="utf-8")
+    err = tmp_path / "r.err"
+    err.write_text("restarted image failed late\n", encoding="utf-8")
+    proc = child("raise SystemExit(7)")
+    wait_exited(proc)
+    restarter = runner.Tracked("dmtcp-restart", runner.ProcId(proc.pid, 1, 0), proc,
+                               own_group=True, stderr_path=err)
+    coord = runner.Tracked("coordinator-restore", runner.ProcId(2, 1, 0))
+    state = trial.TrialState(run_dir, runner.Recorder(run_dir))
+    marks: dict[str, object] = {"lower": {"main": 20}, "upper": {"main": 40},
+                                "kill": {"main": 450}, "kill_line": len(original),
+                                "nonce": NONCE, "original_dead": True}
+    monkeypatch.setattr(trial, "boot_ticks_now", lambda: 0)
+    monkeypatch.setattr(trial, "wait_for_roles_guarded", lambda *a, **k: False)
+    trial.restore_and_verify(state, py_opts(run_dir), trial.CLASSES["py"],
+                             StartedRestoreBackend(restarter, coord),
+                             runner.ArtifactSet(str(run_dir), "ext4", "/dev/vda2"), marks)
+    assert state.checks[-1].name == "restored workload reporting"
+    assert state.checks[-1].status is Status.FAIL
+    diag = state.facts["restore_process_diagnostics"]
+    assert diag["restarter_exit"] == {"pid": proc.pid, "how": "CLD_EXITED", "exit_code": 7}
+    assert diag["restarter_stderr_tail"] == ["restarted image failed late"]
+    assert runner.leader_exited_unreaped(proc)  # still unreaped
+    proc.wait(timeout=5)

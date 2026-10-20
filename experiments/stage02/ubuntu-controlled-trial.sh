@@ -8,7 +8,8 @@
 #   bash experiments/stage02/ubuntu-controlled-trial.sh <EXPECTED_SHA> --reboot-resume
 #   ... --run-trial --class <c-single|c-threads|py|c-file-static|c-file-grow>
 #       (non-c-single classes run under ADR 0004 Amendment 2, approved 2026-10-20 for one
-#        same-boot trial each; reboot modes are c-single only; c-child/tcp/gui are refused)
+#        same-boot trial each; reboot modes are c-single only; c-child/tcp/gui are refused;
+#        ADR 0004 Amendment 3 allows ONE more `py` diagnostic retest, enforced by the harness)
 #
 # Order (stops at the first failure; the trial runs only after every prerequisite passes):
 #   1. HEAD == EXPECTED_SHA, clean working tree
@@ -97,7 +98,8 @@ step "3. Linux-only Stage 02 security tests (none may be skipped)"
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -rs -p no:cacheprovider \
   tests/unit/test_stage02_safety.py tests/unit/test_stage02_launch_config.py \
   tests/unit/test_stage02_classes.py tests/unit/test_stage02_reboot.py \
-  tests/unit/test_stage02_ckptwait.py > "$OUT/security-tests.log" 2>&1
+  tests/unit/test_stage02_ckptwait.py tests/unit/test_stage02_restore_diagnostics.py \
+  > "$OUT/security-tests.log" 2>&1
 rc=$?; tail -3 "$OUT/security-tests.log"
 [ $rc -eq 0 ] || blocked "security tests exit $rc (see security-tests.log)"
 ! grep -qi skipped "$OUT/security-tests.log" || blocked "some security tests were skipped"
