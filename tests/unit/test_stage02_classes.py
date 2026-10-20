@@ -7,15 +7,19 @@ refuses them today, and that evidence is summarised without inventing values.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import platform
 import shutil
+import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from ngexp import backends, cli, model, runner, trial, verify
-from ngexp.results import Status
+from ngexp.backends import Session
+from ngexp.results import Check, Status
 
 NONCE = "b" * 32
 AMENDMENT_2 = ("c-threads", "py", "c-file-static", "c-file-grow")
@@ -184,3 +188,203 @@ def test_c_child_would_be_refused_by_the_single_process_precheck(tmp_path: Path)
         assert len(members) == 2  # parent + child: check_controlled_workload would refuse
     finally:
         assert rec.cleanup() == []
+
+
+# ------------------------------------------------- Amendment 2 gate (disabled by default)
+
+
+def test_amendment_2_flag_is_pinned_off() -> None:
+    assert backends.AMENDMENT_2_APPROVED is False
+    assert backends.AMENDMENT_2_CLASSES == AMENDMENT_2
+    assert set(backends.NEVER_UNDER_ADR_0004) == {"c-child", "tcp", "gui"}
+
+
+def test_amendment_2_refusal_names_the_pending_amendment(tmp_path: Path) -> None:
+    opts = trial.Options(backend="dmtcp", workload_class="py", run_root=tmp_path,
+                         dmtcp_controlled_trial=True)
+    refusal = trial.controlled_trial_refusal(opts, "trial")
+    assert refusal is not None and "Amendment 2, not approved" in refusal
+
+
+def test_when_approved_amendment_2_is_same_boot_trial_only(tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(backends, "AMENDMENT_2_APPROVED", True)
+    for cls in AMENDMENT_2:
+        opts = trial.Options(backend="dmtcp", workload_class=cls, run_root=tmp_path,
+                             dmtcp_controlled_trial=True)
+        assert trial.controlled_trial_refusal(opts, "trial") is None
+        for entry in ("reboot-prepare", "reboot-resume", "matrix"):
+            assert trial.controlled_trial_refusal(opts, entry) is not None
+    for cls in ("c-child", "tcp", "gui"):  # never, even with the amendment approved
+        opts = trial.Options(backend="dmtcp", workload_class=cls, run_root=tmp_path,
+                             dmtcp_controlled_trial=True)
+        refusal = trial.controlled_trial_refusal(opts, "trial")
+        assert refusal is not None and "not allowed under ADR 0004 at all" in refusal
+
+
+# ------------------------------------------------------- multi-role state continuity
+
+
+def role_obs(role: str, counters: list[int], first_line: int) -> list[model.Observation]:
+    return [model.Observation("managed", role, 1, 1, NONCE, c, model.digest_at(NONCE, role, c),
+                              None, c, first_line + i) for i, c in enumerate(counters)]
+
+
+def test_every_thread_role_must_resume_from_the_checkpoint() -> None:
+    marks = verify.Marks(30, 40, 450)
+    original = [o for r in ("main", "t0", "t1", "t2") for o in role_obs(r, [0, 30, 450], 1)]
+    restored = [*role_obs("main", [40, 60], 100), *role_obs("t0", [40, 60], 200),
+                *role_obs("t1", [450, 460], 300),            # t1 did not roll back
+                *role_obs("t2", [40, 60], 400)]
+    results = {role: verify.verify_restore(role=role, original=original, marks=marks,
+                                           restored=restored, original_dead=True)
+               for role in ("main", "t0", "t1", "t2")}
+    assert [r for r, c in results.items() if c.status is Status.FAIL] == ["t1"]
+
+
+# ------------------------------------------------------------- PRF-003 restore timing
+
+
+def test_first_report_latency_uses_the_shared_monotonic_clock() -> None:
+    obs = role_obs("main", [40, 50], 1)  # mono_ns = counter, so the first report is at 40 ns
+    started = obs[0].mono_ns - 1_217_000_000
+    assert verify.first_report_latency_s(started, obs) == 1.217
+    assert verify.first_report_latency_s(started, []) is None
+    assert verify.first_report_latency_s(obs[0].mono_ns + 1, obs) is None  # clock mismatch
+
+
+def test_summary_labels_legacy_restore_timing_as_upper_bound(tmp_path: Path) -> None:
+    write_result(tmp_path, "legacy", {"kind": "trial", "status": "PASS", "checks": [],
+                                      "facts": {"restore_to_first_report_s": 1.217}})
+    write_result(tmp_path, "precise", {"kind": "trial", "status": "PASS", "checks": [],
+                                       "facts": {"restore_to_first_report_s": 0.9,
+                                                 "restore_to_three_reports_upper_bound_s": 1.2,
+                                                 "restore_timing_definition": "x"}})
+    rows = {r["run"]: r for r in trial.summarize_runs(tmp_path)}
+    assert rows["legacy"]["restore_to_first_report_s"] is None
+    assert rows["legacy"]["restore_upper_bound_s"] == 1.217
+    assert rows["legacy"]["restore_timing"] == "legacy upper bound"
+    assert (rows["precise"]["restore_to_first_report_s"], rows["precise"]["restore_upper_bound_s"],
+            rows["precise"]["restore_timing"]) == (0.9, 1.2, "precise")
+
+
+# ------------------------------------------------------------ Ubuntu script allowlist
+
+SCRIPT = Path(__file__).resolve().parents[2] / "experiments" / "stage02" / "ubuntu-controlled-trial.sh"
+
+
+@pytest.mark.parametrize("extra", [
+    ["--run-trial", "--class", "tcp"], ["--run-trial", "--class", "gui"],
+    ["--run-trial", "--class", "c-child"], ["--run-trial", "--class", "c-single;id"],
+    ["--run-trial", "--class", "C-SINGLE"], ["--reboot-prepare", "--class", "py"],
+    ["--reboot-resume", "--class", "c-threads"], ["--run-trial", "--class"],
+    ["--run-trial", "--reboot-prepare"],
+])
+def test_ubuntu_script_class_selection_is_strictly_allowlisted(extra: list[str]) -> None:
+    done = subprocess.run(["bash", str(SCRIPT), "a" * 40, *extra], capture_output=True,
+                          text=True, timeout=30)
+    assert done.returncode == 2 and "usage:" in done.stderr
+
+
+def test_ubuntu_script_maps_harness_refusal_to_blocked() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert '--class "$CLASS"' in text
+    assert '[ $rc -ne 2 ] || blocked "harness refused $CLASS' in text
+
+
+# ------------------------- restore_and_verify integration: file, continuity, exposure
+
+
+class FakeRestoreBackend(backends.Dmtcp):
+    def __init__(self) -> None:
+        self.tools = None
+        self.version = "dmtcp_launch (DMTCP) 4.2.0"
+        self.controlled_trial = True
+        self.listeners = []
+
+    def restore(self, images: Sequence[Path],
+                not_before_ticks: int) -> tuple[Check, Session | None]:
+        return (Check("restore command started", Status.PASS, "fake"),
+                Session(runner.Tracked("fake", runner.ProcId(1, 1, 0))))
+
+    def restored_pid(self, kpid: int | None, pid: int) -> int | None:
+        return None
+
+
+def prepared_file_static(tmp_path: Path, restored_counters: list[int],
+                         held_after: str) -> tuple[trial.TrialState, dict[str, object]]:
+    run_dir = tmp_path / "run"
+    (run_dir / "reports").mkdir(parents=True)
+    original = [ngstate(c) for c in (0, 10, 20, 30, 40, 450)]
+    restored = [ngstate(c) for c in restored_counters]
+    (run_dir / "reports" / "managed.txt").write_text("\n".join(original + restored) + "\n",
+                                                     encoding="utf-8")
+    header = f"NGHOLD v1 nonce={NONCE}\n"
+    (run_dir / "held.txt").write_text(held_after, encoding="utf-8")
+    base = {"exists": True, "size": len(header),
+            "sha256": hashlib.sha256(header.encode()).hexdigest()}
+    state = trial.TrialState(run_dir, runner.Recorder(run_dir))
+    state.baseline_listeners = set()
+    state.facts.update(held_file_at_checkpoint=base, held_file_at_kill=base)
+    marks: dict[str, object] = {"lower": {"main": 30}, "upper": {"main": 40},
+                                "kill": {"main": 450}, "kill_line": len(original),
+                                "nonce": NONCE, "original_dead": True}
+    return state, marks
+
+
+def run_restore(state: trial.TrialState, marks: dict[str, object],
+                monkeypatch: pytest.MonkeyPatch, listeners: list[runner.Listener]) -> None:
+    monkeypatch.setattr(trial, "boot_ticks_now", lambda: 0)
+    monkeypatch.setattr(trial, "current_listeners", lambda: listeners)
+    opts = trial.Options(backend="dmtcp", workload_class="c-file-static", run_root=state.run_dir,
+                         dmtcp_controlled_trial=True, observe_s=0.0)
+    arts = runner.ArtifactSet(str(state.run_dir), "ext4", "/dev/vda2")
+    trial.restore_and_verify(state, opts, trial.CLASSES["c-file-static"], FakeRestoreBackend(),
+                             arts, marks)
+
+
+def statuses(state: trial.TrialState) -> dict[str, Status]:
+    return {c.name: c.status for c in state.checks}
+
+
+def test_file_static_restore_checks_file_and_continuity(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    state, marks = prepared_file_static(tmp_path, [40, 50, 60], f"NGHOLD v1 nonce={NONCE}\n")
+    run_restore(state, marks, monkeypatch, [])
+    got = statuses(state)
+    assert got["held file consistency (c-file-static)"] is Status.PASS
+    assert got["restored state continuity (main)"] is Status.PASS
+    assert "restore_timing_definition" in state.facts
+
+
+def test_file_static_restore_fails_when_the_file_changed(tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    state, marks = prepared_file_static(tmp_path, [40, 50, 60],
+                                        f"NGHOLD v1 nonce={NONCE}\nunexpected write\n")
+    run_restore(state, marks, monkeypatch, [])
+    assert statuses(state)["held file consistency (c-file-static)"] is Status.FAIL
+
+
+def test_file_static_restore_aborts_on_network_exposure(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    state, marks = prepared_file_static(tmp_path, [40, 50, 60], f"NGHOLD v1 nonce={NONCE}\n")
+    exposed = runner.parse_ss_listeners("LISTEN 0 128 0.0.0.0:41000 0.0.0.0:*\n")
+    with pytest.raises(backends.BackendStepError, match="beyond loopback"):
+        run_restore(state, marks, monkeypatch, exposed)
+    assert not any(n.startswith("restored state continuity") for n in statuses(state))
+
+
+def test_each_phase_keeps_its_own_result_file(tmp_path: Path,
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(trial, "environment", lambda run_root: {})
+    state = trial.TrialState(tmp_path, runner.Recorder(tmp_path))
+    opts = trial.Options(backend="dmtcp", workload_class="c-single", run_root=tmp_path)
+    state.add(Check("native checkpoint created", Status.PASS, "x", facts={"duration_s": 1.23}))
+    trial.write_result(state, opts, "reboot-prepare")
+    state.checks = [Check("restored state continuity (main)", Status.PASS, "y")]
+    trial.write_result(state, opts, "reboot-resume")
+    kinds = {json.loads(p.read_text())["kind"] for p in tmp_path.glob("result-*.json")}
+    assert kinds == {"reboot-prepare", "reboot-resume"}
+    rows = trial.summarize_runs(tmp_path.parent)
+    assert {r["kind"] for r in rows if r["run"] == tmp_path.name} == kinds
+    assert next(r for r in rows if r["kind"] == "reboot-prepare")["checkpoint_s"] == 1.23

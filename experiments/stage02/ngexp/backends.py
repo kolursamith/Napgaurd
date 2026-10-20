@@ -90,6 +90,14 @@ def coordinator_log_notes(coord: Tracked) -> list[str]:
 # ADR 0004 (proposed): the only class that may run under the controlled-trial exception.
 CONTROLLED_TRIAL_CLASSES = ("c-single",)
 
+# ADR 0004 Amendment 2 (PROPOSED, NOT APPROVED): further single-process, socket-free classes,
+# same-boot `trial` only. Disabled until the project owner approves the amendment; flipping
+# this flag is the only code change needed, and tests pin it to False until then.
+AMENDMENT_2_CLASSES = ("c-threads", "py", "c-file-static", "c-file-grow")
+AMENDMENT_2_APPROVED = False
+# Never runnable under ADR 0004, whatever is approved: multi-process, sockets (I-1c), GUI.
+NEVER_UNDER_ADR_0004 = ("c-child", "tcp", "gui")
+
 
 def workload_socket_fds(pid: int) -> list[tuple[int, str]]:
     """Sockets the workload itself holds (DMTCP's protected descriptors excluded).

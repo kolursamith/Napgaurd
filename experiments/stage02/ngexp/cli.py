@@ -127,8 +127,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(rows, indent=2, sort_keys=True))
         else:
             keys = ("run", "kind", "status", "class", "checkpoint_s", "image_bytes",
-                    "restore_to_first_report_s", "kill_counter", "restored_first_counter",
-                    "restored_last_counter")
+                    "restore_to_first_report_s", "restore_upper_bound_s", "restore_timing",
+                    "kill_counter", "restored_first_counter", "restored_last_counter")
             print("\t".join(keys))
             for row in rows:
                 print("\t".join("-" if row.get(k) is None else str(row.get(k)) for k in keys))

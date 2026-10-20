@@ -483,7 +483,7 @@ def test_controlled_trial_script_rejects_bad_arguments(args: list[str]) -> None:
 
 def test_controlled_trial_script_runs_trial_only_when_explicitly_requested() -> None:
     text = CONTROLLED_SCRIPT.read_text(encoding="utf-8")
-    head, rest = text.split('case "$MODE" in', 1)
+    head, rest = text.split('case "$MODE" in\n  trial)', 1)  # the step-6 mode block
     gated = rest.split("\nesac\n", 1)[0]
     invocations = [ln for ln in text.splitlines() if "run_stage02.py" in ln
                    and ("trial --backend" in ln or "reboot-" in ln)]

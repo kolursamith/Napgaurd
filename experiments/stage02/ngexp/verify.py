@@ -215,3 +215,24 @@ def verify_held_file(*, class_name: str, nonce: str, at_checkpoint: dict[str, ob
         observed = "restored writes appended after the pre-termination data"
     return Check("held file behaviour (c-file-grow, LIM-007 observation)", Status.PASS,
                  observed, mandatory=False, facts=facts)
+
+
+# ---------------------------------------------------------------------- PRF-003 timing
+
+RESTORE_TIMING_DEFINITION = (
+    "restore_to_first_report_s = mono_ns of the earliest restored NGSTATE report minus "
+    "time.monotonic_ns() taken immediately before the restore command (both CLOCK_MONOTONIC, "
+    "same boot); restore_to_three_reports_upper_bound_s = wall time from restore start until "
+    "the harness had seen >= 3 restored reports per role, adopted them and audited listeners"
+)
+
+
+def first_report_latency_s(started_mono_ns: int,
+                           restored: Sequence[model.Observation]) -> float | None:
+    """Seconds from restore start to the first restored report, or None if not measurable."""
+    if not restored:
+        return None
+    first = min(o.mono_ns for o in restored)
+    if first < started_mono_ns:
+        return None  # not the same clock/boot: refuse to report a number
+    return round((first - started_mono_ns) / 1e9, 3)

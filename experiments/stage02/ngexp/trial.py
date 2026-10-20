@@ -29,9 +29,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import backends as backend_policy
 from . import model, verify
 from .backends import (
+    AMENDMENT_2_CLASSES,
     CONTROLLED_TRIAL_CLASSES,
+    NEVER_UNDER_ADR_0004,
     Backend,
     BackendStepError,
     Criu,
@@ -232,8 +235,11 @@ def write_result(state: TrialState, opts: Options, kind: str) -> Status:
         "checks": [c.to_json() for c in state.checks],
         "facts": state.facts,
     }
-    (state.run_dir / "result.json").write_text(json.dumps(result, indent=2, sort_keys=True,
-                                                          default=str), encoding="utf-8")
+    text = json.dumps(result, indent=2, sort_keys=True, default=str)
+    # result.json is the latest result; result-<kind>.json keeps each phase, so a
+    # reboot-resume no longer overwrites the reboot-prepare evidence in the same run dir.
+    (state.run_dir / "result.json").write_text(text, encoding="utf-8")
+    (state.run_dir / f"result-{kind}.json").write_text(text, encoding="utf-8")
     print_summary(state, status)
     return status
 
@@ -336,9 +342,18 @@ def controlled_trial_refusal(opts: Options, entry: str) -> str | None:
                 f"`reboot-resume` only, not `{entry}`")
     if opts.backend != "dmtcp":
         return "the ADR 0004 controlled-trial exception applies to the DMTCP backend only"
-    if opts.workload_class not in CONTROLLED_TRIAL_CLASSES:
-        return (f"class {opts.workload_class!r} is not allowed under ADR 0004 "
-                f"(allowed: {', '.join(CONTROLLED_TRIAL_CLASSES)})")
+    if opts.workload_class in NEVER_UNDER_ADR_0004:
+        return (f"class {opts.workload_class!r} is not allowed under ADR 0004 at all "
+                "(multi-process, sockets, or GUI)")
+    allowed = list(CONTROLLED_TRIAL_CLASSES)
+    # Read the approval flag at call time from its single source (backends).
+    if backend_policy.AMENDMENT_2_APPROVED and entry == "trial":  # Amendment 2: same boot only
+        allowed += AMENDMENT_2_CLASSES
+    if opts.workload_class not in allowed:
+        pending = (" (proposed in ADR 0004 Amendment 2, not approved)"
+                   if opts.workload_class in AMENDMENT_2_CLASSES else "")
+        return (f"class {opts.workload_class!r} is not allowed under ADR 0004 for `{entry}`"
+                f"{pending} (allowed: {', '.join(allowed)})")
     return None
 
 
@@ -377,6 +392,7 @@ def restore_and_verify(state: TrialState, opts: Options, wc: WorkloadClass, back
     kill_line = int(marks["kill_line"])
     original = [o for o in model.read_reports(report) if o.line_no <= kill_line]
     started = time.monotonic()
+    started_ns = time.monotonic_ns()  # same clock as the workload's mono_ns (CLOCK_MONOTONIC)
     restore_at = boot_ticks_now()
     restore_check, session = backend.restore(backend.image_paths(artifacts), restore_at)
     state.add(restore_check)
@@ -394,7 +410,10 @@ def restore_and_verify(state: TrialState, opts: Options, wc: WorkloadClass, back
     guard_network(state, "restore")
     time.sleep(opts.observe_s)
     restored = model.read_reports(report, kill_line)
-    state.facts["restore_to_first_report_s"] = round(time.monotonic() - started - opts.observe_s, 3)
+    state.facts["restore_to_three_reports_upper_bound_s"] = round(
+        time.monotonic() - started - opts.observe_s, 3)
+    state.facts["restore_to_first_report_s"] = verify.first_report_latency_s(started_ns, restored)
+    state.facts["restore_timing_definition"] = verify.RESTORE_TIMING_DEFINITION
     held = held_file(state, wc)
     if held is not None:
         after = file_snapshot(held)
@@ -765,7 +784,12 @@ def summarize_runs(run_root: Path) -> list[dict[str, Any]]:
     Reports only values present in the files; anything missing is None, never estimated.
     """
     rows: list[dict[str, Any]] = []
-    for result_path in sorted(run_root.glob("*/result.json")):
+    paths: list[Path] = []
+    for run_dir in sorted(p for p in run_root.glob("*") if p.is_dir()):
+        per_phase = sorted(run_dir.glob("result-*.json"))
+        paths += per_phase or ([run_dir / "result.json"] if (run_dir / "result.json").is_file()
+                               else [])
+    for result_path in paths:
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -787,7 +811,14 @@ def summarize_runs(run_root: Path) -> list[dict[str, Any]]:
             "checkpoint_s": ckpt.get("duration_s"),
             "image_bytes": sum(int(i.get("size", 0)) for i in images) if images else None,
             "artifact_total_bytes": facts.get("artifact_total_bytes"),
-            "restore_to_first_report_s": facts.get("restore_to_first_report_s"),
+            # Runs before the timing fix stored an UPPER BOUND under this name; report it
+            # as such and never as a first-report time.
+            "restore_to_first_report_s": facts.get("restore_to_first_report_s")
+            if "restore_timing_definition" in facts else None,
+            "restore_upper_bound_s": facts.get("restore_to_three_reports_upper_bound_s",
+                                               facts.get("restore_to_first_report_s")),
+            "restore_timing": "precise" if "restore_timing_definition" in facts
+            else ("legacy upper bound" if "restore_to_first_report_s" in facts else None),
             "nonce": cont.get("nonce"), "kill_counter": cont.get("kill_counter"),
             "restored_first_counter": cont.get("restored_first_counter"),
             "restored_last_counter": cont.get("restored_last_counter"),

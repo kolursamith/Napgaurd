@@ -775,9 +775,9 @@ States: VERIFIED PASS, VERIFIED FAIL, BLOCKED (with documented reason), NOT TEST
 | Same-boot genuine checkpoint/restore | roadmap Stage 02 gate | **VERIFIED PASS** (c-single) | section T |
 | Cross-reboot genuine checkpoint/restore | Stage 02 brief | **VERIFIED PASS** (c-single) | section W |
 | PLT-009 | backend self-check recorded at startup | **VERIFIED PASS (substitute check)** | DMTCP has no self-check command. The substitute is `dmtcp_launch --version` = 4.2.0 plus `dmtcp-isolation-check` PASS (sections O, T, W). It covers version and network confinement, not kernel features. **The owner must accept the substitute.** |
-| PRF-001 | checkpoint duration recorded | **VERIFIED PASS** (2 trials) | 1.21 s (same boot), 1.23 s (cross-reboot): verified completion time, user-reported |
-| PRF-002 | image size recorded | **VERIFIED PASS** (2 trials) | 25,059,040 B and 25,050,848 B, user-reported |
-| PRF-003 | restore duration recorded | **NOT TESTED (not yet extracted)** | The harness records `restore_to_first_report_s` (restore command start to first restored report, an **upper bound** on restore time) in `result.json` on the VM. The value has not been reported. Extract it with `run_stage02.py summarize`. |
+| PRF-001 | checkpoint duration recorded | **VERIFIED PASS** (2 observations) | 1.206 s (same boot, from `summarize`) and about 1.23 s (cross-reboot, from the preparation log). See section Y. |
+| PRF-002 | image size recorded | **VERIFIED PASS** (2 observations) | 25,059,040 B (same boot, from `summarize`) and 25,050,848 B (cross-reboot, from the preparation log). See section Y. |
+| PRF-003 | restore duration recorded | **VERIFIED PASS (upper bound)** (2 observations) | 1.217 s (same boot) and 1.218 s (cross-reboot), both from `summarize`. Correct definition: the time from the restore command starting until the harness had seen **at least 3** restored reports per role, adopted them, and audited listeners. That is an **upper bound** on restore-to-first-report, not the first-report time itself. Precise first-report latency is recorded from now on. See section Y. |
 | CMP-001 `c-single` | compatibility matrix | **VERIFIED PASS** | sections T, W |
 | CMP-001 `c-threads`, `py`, `c-file-static` | compatibility matrix | **NOT TESTED** | not authorised by ADR 0004; harness and checks ready (Amendment 2, proposed) |
 | CMP-001 `c-file-grow` | compatibility matrix | **NOT TESTED** | as above; it doubles as the LIM-007 probe |
@@ -825,3 +825,43 @@ States: VERIFIED PASS, VERIFIED FAIL, BLOCKED (with documented reason), NOT TEST
   - held-file verifier cases;
   - the summary reports only recorded values and writes nothing;
   - **Linux-only:** each Amendment 2 class, run natively without DMTCP, is a single process with no workload sockets and valid digests. The static file stays unchanged and the growing file grows. `c-child` would be refused by the single-process precheck.
+
+## Y. Recorded measurements (individual observations, not benchmark averages)
+
+| Run | Phase | Checkpoint completion | Image | Restore timing | Counters (termination → first restored → last) | Verdict | Source |
+|---|---|---|---|---|---|---|---|
+| `20261020T093355Z-dmtcp-c-single-7bce` | same boot | 1.206 s | 25,059,040 B | 1.217 s (upper bound, see below) | 450 → 40 → 340 | PASS | `summarize` (`result.json`) |
+| `20261020T100428Z-reboot-dmtcp-c-single-ed7a` | prepare (boot 1) | about 1.23 s | 25,050,848 B | — | — | PASS | **preparation log** |
+| `20261020T100428Z-reboot-dmtcp-c-single-ed7a` | resume (boot 2) | — | — | 1.218 s (upper bound) | 430 → 40 → 340 | PASS | `summarize` (`result.json`) |
+
+**Why the cross-reboot checkpoint values come from the log.** Prepare and resume share one run directory, and at commit `55905be4` the resume's `result.json` **overwrote** the prepare's. The prepare-phase checkpoint facts survived only in its log. This commit fixes that: each phase also writes `result-<kind>.json`, and `summarize` reads those files.
+
+**Restore timing definition (PRF-003).** Two values are recorded from this commit on:
+
+- `restore_to_first_report_s`, which is **precise**: the `mono_ns` of the earliest restored `NGSTATE` report minus `time.monotonic_ns()` taken immediately before the restore command. Both use `CLOCK_MONOTONIC` in the same boot. If the clocks do not line up, it is `None`, never a guess.
+- `restore_to_three_reports_upper_bound_s`: the previous measurement, wall time from restore start until at least 3 restored reports per role were seen, adopted, and audited.
+
+Runs from before this commit stored the upper bound under the name `restore_to_first_report_s`. `summarize` now reports those values as `restore_upper_bound_s` with `restore_timing = legacy upper bound`.
+
+## Z. Compatibility trial preparation (ADR 0004 Amendment 2): prepared, DISABLED
+
+- **The gate** is `backends.AMENDMENT_2_CLASSES = (c-threads, py, c-file-static, c-file-grow)`, guarded by `AMENDMENT_2_APPROVED = False` and read at call time from that single source. When approved, those classes are allowed for **same-boot `trial` only**: never `matrix`, never `reboot-*`. `NEVER_UNDER_ADR_0004 = (c-child, tcp, gui)` is refused regardless of approval.
+- **The Ubuntu script** takes `--class` with a strict allowlist (`c-single | c-threads | py | c-file-static | c-file-grow`). Anything else is a usage error (exit 2), including `c-child`, `tcp`, `gui`, a wrong case, and shell metacharacters. Reboot modes accept `c-single` only. A harness refusal (exit 2) is reported as **BLOCKED**, so until approval a run like `--run-trial --class py` reports BLOCKED without checkpointing anything.
+- **Checks per class** (unchanged, all mandatory except where noted):
+  - one process, no workload sockets;
+  - fresh isolation and the fail-closed hand-off;
+  - verified checkpoint completion;
+  - original termination;
+  - per-role state continuity (`c-threads`: every one of `main`, `t0`–`t2`);
+  - held-file consistency: mandatory for `c-file-static`, a recorded LIM-007 observation for `c-file-grow`;
+  - listener audits and the leak scan.
+- **New tests** (`tests/unit/test_stage02_classes.py`):
+  - the flag is pinned off;
+  - the approved path stays same-boot trial only, and the never-allowed classes stay refused;
+  - multi-role continuity (one non-rolled-back thread fails);
+  - precise and legacy timing;
+  - the script allowlist (9 rejection cases) and BLOCKED mapping;
+  - a `restore_and_verify` integration test for `c-file-static` with a fake backend: file consistency PASS, a changed file FAIL, and network exposure aborting before any continuity claim;
+  - per-phase result preservation.
+
+**Status:** no additional class has been run. **Approval of ADR 0004 Amendment 2 is required**; then `AMENDMENT_2_APPROVED = True` and the pinned tests are updated in a reviewed commit.

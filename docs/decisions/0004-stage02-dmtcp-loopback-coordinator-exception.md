@@ -108,11 +108,10 @@ These are in addition to conditions 1–11 above, which apply to both phases.
 
 **Explicitly excluded:** reboot runs of these classes, `c-child`, `tcp`, `gui`, `matrix`, and CRIU.
 
-**Enabling, after approval only:**
+**Enabling, after approval only.** The gate and the script's strict `--class` allowlist are already implemented and disabled (Stage 02 report section Z). Enabling means one reviewed commit that:
 
-- set `CONTROLLED_TRIAL_CLASSES` to the five approved classes;
-- add `--class` to `ubuntu-controlled-trial.sh` (restricted to the same list);
-- update the tests that pin the current scope (`test_only_c_single_is_authorised`, `test_amendment_2_classes_are_still_refused`).
+- sets `backends.AMENDMENT_2_APPROVED = True`, which allows the four classes for same-boot `trial` only;
+- updates the pinned tests (`test_amendment_2_flag_is_pinned_off`, `test_only_c_single_is_authorised`, `test_amendment_2_classes_are_still_refused`).
 
 ## Consequences
 

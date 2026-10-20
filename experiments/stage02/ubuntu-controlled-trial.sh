@@ -6,6 +6,9 @@
 #   bash experiments/stage02/ubuntu-controlled-trial.sh <EXPECTED_SHA> --reboot-prepare
 #       (then YOU power the VM off and on; nothing here reboots)
 #   bash experiments/stage02/ubuntu-controlled-trial.sh <EXPECTED_SHA> --reboot-resume
+#   ... --run-trial --class <c-single|c-threads|py|c-file-static|c-file-grow>
+#       (non-c-single classes need ADR 0004 Amendment 2; until it is approved the harness
+#        refuses them and this script reports BLOCKED. Reboot modes are c-single only.)
 #
 # Order (stops at the first failure; the trial runs only after every prerequisite passes):
 #   1. HEAD == EXPECTED_SHA, clean working tree
@@ -24,20 +27,32 @@
 set -u
 
 usage() {
-  echo "usage: $0 <EXPECTED_SHA (40 hex)> [--run-trial | --reboot-prepare | --reboot-resume]" >&2
+  echo "usage: $0 <EXPECTED_SHA (40 hex)> [--run-trial | --reboot-prepare | --reboot-resume]" \
+       "[--class c-single|c-threads|py|c-file-static|c-file-grow]" >&2
   exit 2
 }
 EXPECTED=${1:-}
 [[ "$EXPECTED" =~ ^[0-9a-f]{40}$ ]] || usage
 MODE=none
-case "${2:-}" in
-  "") ;;
-  --run-trial) MODE=trial ;;
-  --reboot-prepare) MODE=reboot-prepare ;;
-  --reboot-resume) MODE=reboot-resume ;;
-  *) usage ;;
-esac
-[ $# -le 2 ] || usage
+CLASS=c-single
+shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-trial) [ "$MODE" = none ] || usage; MODE=trial ;;
+    --reboot-prepare) [ "$MODE" = none ] || usage; MODE=reboot-prepare ;;
+    --reboot-resume) [ "$MODE" = none ] || usage; MODE=reboot-resume ;;
+    --class)
+      [ $# -ge 2 ] || usage
+      case "$2" in  # strict allowlist; anything else (incl. c-child, tcp, gui) is refused
+        c-single|c-threads|py|c-file-static|c-file-grow) CLASS=$2 ;;
+        *) usage ;;
+      esac
+      shift ;;
+    *) usage ;;
+  esac
+  shift
+done
+case "$MODE" in reboot-*) [ "$CLASS" = c-single ] || usage ;; esac
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)" || exit 2
 OUT="$HOME/napguard-stage02-evidence-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -65,7 +80,7 @@ non_loopback() { awk '{print $1" "$5}' "$1" | grep -vE ' (127\.|\[::1\]:|::1:)' 
 mkdir -p "$OUT" && chmod 700 "$OUT"
 cd "$REPO" || exit 2
 { date -Is; uname -a; grep PRETTY_NAME /etc/os-release; python3 --version
-  echo "boot_id=$(cat /proc/sys/kernel/random/boot_id) mode=$MODE"; } | tee "$OUT/host.txt"
+  echo "boot_id=$(cat /proc/sys/kernel/random/boot_id) mode=$MODE class=$CLASS"; } | tee "$OUT/host.txt"
 
 step "1. Exact revision and clean tree"
 HEAD_SHA=$(git rev-parse HEAD)
@@ -96,10 +111,11 @@ rc=$?; tail -8 "$OUT/isolation.log"
 
 case "$MODE" in
   trial)
-    step "6. ONE controlled c-single checkpoint/restore trial (ADR 0004)"
-    python3 -I experiments/stage02/run_stage02.py trial --backend dmtcp --class c-single \
+    step "6. ONE controlled $CLASS checkpoint/restore trial (ADR 0004)"
+    python3 -I experiments/stage02/run_stage02.py trial --backend dmtcp --class "$CLASS" \
       --adr-0004-controlled-trial > "$OUT/trial.log" 2>&1
     rc=$?; tail -20 "$OUT/trial.log"
+    [ $rc -ne 2 ] || blocked "harness refused $CLASS (BLOCKED; e.g. ADR 0004 Amendment 2 not approved)"
     [ $rc -eq 0 ] || failed "trial exit $rc (see trial.log)" ;;
   reboot-prepare)
     step "6. Cross-reboot PREPARE: checkpoint, terminate, stop coordinators, write manifest"
