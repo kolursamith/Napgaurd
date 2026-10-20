@@ -366,6 +366,19 @@ class Recorder:
         return survivors
 
 
+def socket_fds(pid: int) -> list[tuple[int, str]]:
+    """(fd, link) for every socket descriptor of `pid` (same-user processes only)."""
+    found = []
+    for entry in Path(f"/proc/{pid}/fd").iterdir():
+        try:
+            link = os.readlink(entry)
+        except OSError:
+            continue  # descriptor closed while listing
+        if link.startswith("socket:"):
+            found.append((int(entry.name), link))
+    return sorted(found)
+
+
 def boot_ticks_now() -> int:
     """Current time in the clock-tick units of /proc/<pid>/stat field 22 (since boot)."""
     uptime = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
@@ -453,6 +466,41 @@ def non_loopback_ipv4_addresses() -> list[str]:
         raise RuntimeError(f"ip -o -4 addr show failed: {done.stderr.strip()}")
     addrs = re.findall(r"\binet (\d+\.\d+\.\d+\.\d+)/", done.stdout)
     return [a for a in addrs if not a.startswith("127.")]
+
+
+def non_loopback_ipv6_addresses() -> list[str]:
+    """Global-scope IPv6 addresses (link-local ones need a scope id and are not probed)."""
+    done = subprocess.run(["ip", "-o", "-6", "addr", "show", "scope", "global"],
+                          capture_output=True, text=True, timeout=10)
+    if done.returncode != 0:
+        raise RuntimeError(f"ip -o -6 addr show failed: {done.stderr.strip()}")
+    return re.findall(r"\binet6 ([0-9a-fA-F:]+)/", done.stdout)
+
+
+def new_non_loopback(listeners: Sequence[Listener], baseline: set[tuple[str, str]]) -> list[Listener]:
+    """Non-loopback listeners (any owner) that were not present in the baseline snapshot."""
+    return [lst for lst in listeners if not lst.loopback and (lst.proto, lst.local) not in baseline]
+
+
+def run_dir_processes(run_dir: Path) -> list[ProcInfo]:
+    """This user's live processes (other than the harness) whose cmdline or mappings mention
+    `run_dir`. Used only to REPORT leaked experiment processes, never to choose kill targets."""
+    marker = str(run_dir.resolve()).encode()
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        info = read_info(int(entry.name))
+        if info is None or not info.running or info.ident.uid != os.getuid():
+            continue
+        for name in ("cmdline", "maps"):
+            try:
+                if marker in (entry / name).read_bytes():
+                    found.append(info)
+                    break
+            except OSError:
+                continue
+    return found
 
 
 def tcp_reachable(host: str, port: int, timeout: float = 1.0) -> bool:

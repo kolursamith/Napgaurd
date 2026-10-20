@@ -3,7 +3,7 @@
 - Date: 2026-10-19
 - Baseline: Stage 01 PASS (user-reported) at `39714383fcd9b683f367e7476882bfb7102adaa3` on `stage-01/requirements-design`
 - Branch: `stage-02/checkpoint-feasibility`, created from the approved Stage 01 commit. The commit SHA is recorded in Git history and the Ubuntu logs.
-- Verdict: **BLOCKED pending a security decision (OD-13 or OD-14).** Preparation is complete, but neither backend can run a trial under the current safety rules:
+- Verdict: **BLOCKED pending a security decision (OD-13 or OD-14). The DMTCP loopback isolation probe passed on Ubuntu (section O). ADR 0004 (proposed) awaits approval before any checkpoint trial.** Preparation is complete, but neither backend can run a trial under the current safety rules:
   - The harness refuses to start a DMTCP coordinator, because no supported option keeps it off the network (section I-1a).
   - CRIU needs privileges as an ordinary user (I-2).
   - No checkpoint has run on Ubuntu yet.
@@ -33,7 +33,7 @@ The user ran these on Ubuntu 24.04.5 LTS aarch64 at commit `4879432d7c59b4f5a351
 | `kernel.apparmor_restrict_unprivileged_userns` | `1` |
 | Experiment storage | `/dev/vda2`, ext4 (persistent) |
 
-No checkpoint or restore has run on Ubuntu. Neither backend is installed.
+No checkpoint or restore has run on Ubuntu. Neither backend was installed at that commit. For the later DMTCP build and isolation evidence, see section O.
 
 ## A. Existing design audit
 
@@ -474,3 +474,100 @@ Pre-commit hardening of the isolation probe (it now fails closed on audit errors
 - A failing `ip` command is an error, never an empty address list that would silently skip the external-connect test.
 - A spawn failure (for example fd 821 in use) is recorded as a FAIL, not raised as an unhandled exception.
 - The isolation audit runs once, inside the error handling.
+
+## O. Ubuntu DMTCP isolation evidence (user-reported, commit a57149e0)
+
+Recorded 2026-10-19. These are user-reported results; Claude has not reviewed the raw evidence files.
+
+| Observed on Ubuntu 24.04 aarch64 | Value |
+|---|---|
+| Commit | `a57149e0bfb42233c1c473c69486cd8a4021c308` |
+| Kernel (reported at Stage 03 entry) | `7.0.0-38-generic` |
+| DMTCP | 4.2.0, built from the pinned source with `build-dmtcp.sh` |
+| Command | `python3 -I experiments/stage02/run_stage02.py dmtcp-isolation-check` |
+| Coordinator port and listener | 55703, `127.0.0.1:55703` |
+| Non-loopback address tested | `192.168.64.3`: connection **refused** |
+| `dmtcp_command --status` over loopback | succeeded |
+| Coordinator stop and cleanup | coordinator stopped; all tracked experiment processes cleaned up |
+| Checks and exit code | **5 PASS**, `ISOLATION_EXIT=0` |
+| Evidence directory (on the VM) | `~/.local/share/napguard-stage02/runs/20261019T142320Z-dmtcp-isolation-check-618c` |
+
+What this does **not** establish:
+
+- **No checkpoint or restore has run.** No workload was launched, and nothing about checkpointing is verified.
+- **Fail-closed behaviour against real DMTCP is not demonstrated.** The run shows DMTCP *adopted* the pre-bound listener. Fail-closed behaviour has been shown only by Linux unit tests with a fake coordinator, plus the real kernel's `EADDRINUSE` refusal in `test_wildcard_bind_is_refused_next_to_loopback_listener`. It has not been reported which commit those Linux-only tests last passed at.
+- **Coverage is IPv4 only.** Only IPv4 non-loopback addresses were probed. The coordinator binds IPv4 only (`JSockAddr` is `sockaddr_in`), and the `ss` audit covers IPv6 listeners too.
+
+## P. Exposure review: launch, checkpoint, restore
+
+| Step | Network behaviour (source reading, DMTCP 4.2.0) | Protection in the harness | Status |
+|---|---|---|---|
+| Coordinator start (launch and restore each start one) | the listener is adopted from fd 821; the fallback `INADDR_ANY:P` bind is refused by the kernel | the fail-closed hand-off and per-coordinator audit (section N) | hand-off adoption **observed on Ubuntu** (section O); fail-closed path tested with a fake coordinator only |
+| `dmtcp_launch --join-coordinator` | client connection to `127.0.0.1:P`; never starts its own coordinator | audit after launch | not yet run with real DMTCP |
+| Workload under DMTCP | DMTCP's connection socket sits at protected fds (≥ 820) | the ADR 0004 precheck: one process, no sockets below fd 820 | not yet run |
+| `dmtcp_command --bcheckpoint` | client connection only | audit after checkpoint | not yet run |
+| `dmtcp_restart --join-coordinator` | **opens an `INADDR_ANY` restore listener only if the image contains workload IPv4/IPv6 sockets** (`connectionrewirer.cpp:173-207`). A UNIX restore socket is used for UNIX-domain connections. | the precheck guarantees no workload sockets at checkpoint; audits every ~0.5 s while waiting, and after restore | **source reading only. If wrong, exposure lasts at most until the next audit, then the trial aborts** |
+| `ssh` plugin | listens on `INADDR_ANY` (`dmtcp_ssh.cpp:100`) | not used (no remote processes) | n/a |
+
+## Q. Workload classes for a first experiment
+
+| Class | Initial trial? | Reason |
+|---|---|---|
+| `c-single` | **Yes, only class under ADR 0004** | one process, one application thread, no sockets, no held files; 4 MiB ballast proves memory restoration |
+| `c-threads` | Not yet; next candidate | no sockets, but restores multiple threads on ARM64 (B4 TODO in the restart path). Run after `c-single` passes. |
+| `py` | Not yet; next candidate | interpreter process; no sockets expected, but the precheck would have to be shown on Ubuntu first |
+| `c-file-static` | Not yet | open writable file; tests file-restore semantics (LIM-007) |
+| `c-child` | **Blocked** | multi-process: the precheck requires a single process; process-tree restore and cleanup need separate review |
+| `c-file-grow` | Blocked for now | studies the LIM-007 failure mode; not a feasibility gate |
+| `tcp` | **Blocked** | workload sockets make DMTCP open an `INADDR_ANY` restore listener (I-1c) |
+| `gui` | **Blocked** | X11/Wayland sockets; out of scope (EXC-001) |
+
+## R. Proposed change for one controlled trial (uncommitted, awaiting review)
+
+This is implemented in the working tree for review only and is not active by default:
+
+- **`trial --adr-0004-controlled-trial`** is accepted for `--backend dmtcp --class c-single` only. Every other combination, and `matrix` or `reboot-*`, is refused (BLOCKED). The flag does not exist on other subcommands.
+- **`Dmtcp(controlled_trial=True)`**: `probe()` returns PASS with an "ADR 0004" note, and `_coordinator()` starts coordinators **only** through the fail-closed loopback hand-off. `DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED` stays `False`.
+- **`check_controlled_workload()` before checkpoint:** the managed group must contain exactly one process, and `workload_socket_fds(pid)` must be empty, ignoring DMTCP's fds 820–859. Otherwise the trial fails before any checkpoint.
+- **`wait_for_roles_guarded()`:** listeners are re-audited about every 0.5 s while waiting for the restored workload, in addition to the audits after launch, checkpoint, and restore.
+- **Ownership-independent audit (review fix):** a listener baseline is taken before the trial starts anything. Any new non-loopback listener aborts the trial, whatever its owner, so a restored process that left the experiment's session cannot hide one. If no baseline can be taken, the trial is BLOCKED.
+- **IPv6 (review fix):** global-scope IPv6 addresses are now probed as well as IPv4.
+- **Leak scan (review fix):** after cleanup, any live process of the user that references the run directory makes the trial FAIL. It is reported, not killed.
+- **Version check (review fix):** the controlled-mode probe is BLOCKED unless DMTCP reports 4.2.0.
+- **Tests:**
+  - **Portable:** the exception's scope (7 refusal cases); that the flag exists only on `trial`; that the global gate is unchanged and the exception applies per instance; that a version other than 4.2.0 is refused before any spawn.
+  - **Linux-only:** socket detection, which ignores only DMTCP's protected descriptors.
+
+### Ubuntu verification procedure (after review, ADR approval, commit, and push)
+
+The scripted procedure, `experiments/stage02/ubuntu-controlled-trial.sh <SHA> [--run-trial]`, does the following:
+
+- Stops with **BLOCKED** at the first failed prerequisite, without attempting any checkpoint. The prerequisites are, in order: SHA, clean tree, baseline, the Linux-only security tests (none may be skipped), and a fresh isolation check.
+- Runs the single controlled trial only with `--run-trial`.
+- Compares before and after listener snapshots, and checks for leftover processes of the user.
+- Writes evidence to `~/napguard-stage02-evidence-<utc>/`.
+
+The manual equivalent:
+
+```sh
+cd ~/napguard && git fetch origin && git checkout stage-02/checkpoint-feasibility && git pull --ff-only
+git rev-parse HEAD                                    # must equal the reviewed commit
+bash scripts/layer0-ubuntu-check.sh <SHA> 2>&1 | tee ~/s02r-baseline.log
+python3 -m pytest -q tests/unit/test_stage02_safety.py -rs 2>&1 | tee ~/s02r-safety.log   # no Linux-only test may be skipped
+python3 -I experiments/stage02/run_stage02.py dmtcp-isolation-check 2>&1 | tee ~/s02r-isolation.log
+# Only if the isolation check passes in this boot, and ADR 0004 is approved:
+python3 -I experiments/stage02/run_stage02.py trial --backend dmtcp --class c-single \
+    --adr-0004-controlled-trial 2>&1 | tee ~/s02r-dmtcp-c-single.log; echo "TRIAL_EXIT=${PIPESTATUS[0]}"
+ss -H -l -n -t -u -p | tee ~/s02r-listeners-after.log # expect no experiment-owned listeners
+```
+
+Expected evidence:
+
+- `controlled-trial preconditions` PASS;
+- `native checkpoint created` PASS, with the image size and artifacts on ext4;
+- `restored state continuity (main)` PASS (same nonce, counter rolled back into the checkpoint window, ballast intact);
+- every `dmtcp_isolation` event shows only `127.0.0.1` listeners;
+- no `network_exposure` event;
+- `experiment processes cleaned up` PASS.
+
+Anything else is reported as FAIL or BLOCKED. A PASS here would be **same-boot only**; a cross-reboot DMTCP trial needs an ADR 0004 amendment.

@@ -32,7 +32,9 @@ from .runner import (
     listener_violations,
     loopback_listener,
     non_loopback_ipv4_addresses,
+    non_loopback_ipv6_addresses,
     read_text,
+    socket_fds,
     tcp_reachable,
     wait_until,
 )
@@ -67,6 +69,23 @@ DMTCP_COORDINATOR_BLOCKER = (
 # with EADDRINUSE while our 127.0.0.1:<port> socket is listening, and the coordinator exits.
 PROTECTED_COORD_FD = 821
 FD_HANDOFF_ANALYSED_VERSION = "4.2.0"
+# DMTCP keeps its own descriptors (coordinator connection, restore sockets, ...) at
+# PROTECTED_FD_START = 820 and upward (include/protectedfds.h lists ~25 entries). Sockets in
+# this range belong to DMTCP, not to the workload. Anything below it is a workload socket.
+DMTCP_PROTECTED_FDS = range(820, 860)
+
+# ADR 0004 (proposed): the only class that may run under the controlled-trial exception.
+CONTROLLED_TRIAL_CLASSES = ("c-single",)
+
+
+def workload_socket_fds(pid: int) -> list[tuple[int, str]]:
+    """Sockets the workload itself holds (DMTCP's protected descriptors excluded).
+
+    DMTCP opens a restore-time listener on INADDR_ANY only when the image contains
+    workload sockets (plugin/ipc/socket/connectionrewirer.cpp:173-207), so a controlled
+    trial must checkpoint a process for which this list is empty.
+    """
+    return [(fd, link) for fd, link in socket_fds(pid) if fd not in DMTCP_PROTECTED_FDS]
 
 
 def wildcard_bind_refused(port: int) -> bool:
@@ -150,9 +169,11 @@ def dmtcp_restart_argv(
 class Dmtcp:
     name = "dmtcp"
 
-    def __init__(self, rec: Recorder, prefix: Path | None) -> None:
+    def __init__(self, rec: Recorder, prefix: Path | None, controlled_trial: bool = False) -> None:
         self.rec = rec
         self.tools = find_dmtcp(prefix)
+        # ADR 0004 (proposed) per-invocation exception; the global gate stays closed.
+        self.controlled_trial = controlled_trial
         self.ckpt_dir = rec.run_dir / "checkpoint"
         self.tmp_dir = rec.run_dir / "dmtcp-tmp"
         self.version = "unknown"
@@ -169,6 +190,15 @@ class Dmtcp:
         if not res.ok:
             return Check("backend available", Status.BLOCKED,
                          f"dmtcp_launch --version failed: {res.summary()}", facts=facts)
+        if self.controlled_trial and FD_HANDOFF_ANALYSED_VERSION not in self.version:
+            return Check("backend available", Status.BLOCKED,
+                         f"ADR 0004 covers DMTCP {FD_HANDOFF_ANALYSED_VERSION} only; found "
+                         f"{self.version!r}", facts=facts)
+        if self.controlled_trial:
+            return Check("backend available", Status.PASS,
+                         f"DMTCP {self.version} under the ADR 0004 controlled-trial exception "
+                         "(loopback fd hand-off, c-single only, listener audits enforced)",
+                         facts=facts)
         if not DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED:
             return Check("backend available", Status.BLOCKED,
                          f"DMTCP {self.version} installed, but {DMTCP_COORDINATOR_BLOCKER}",
@@ -176,8 +206,11 @@ class Dmtcp:
         return Check("backend available", Status.PASS, f"DMTCP {self.version}", facts=facts)
 
     def _coordinator(self, label: str) -> tuple[Tracked, int]:
-        """Coordinator for trials: refused until the loopback hand-off is verified and approved."""
-        if not DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED:
+        """Coordinator for trials: refused unless the global gate or the ADR 0004 exception allows it.
+
+        Either way, the coordinator only ever starts through the fail-closed loopback hand-off.
+        """
+        if not (DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED or self.controlled_trial):
             raise BackendStepError(DMTCP_COORDINATOR_BLOCKER)  # nothing has been spawned
         coord, port, _ = self._loopback_coordinator(label)
         return coord, port
@@ -223,7 +256,7 @@ class Dmtcp:
         """
         try:
             listeners = current_listeners()
-            addresses = non_loopback_ipv4_addresses()
+            addresses = non_loopback_ipv4_addresses() + non_loopback_ipv6_addresses()
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             self.rec.terminate(coord, sig=signal.SIGKILL)
             raise BackendStepError(f"listener audit failed for {label}: {exc}") from exc

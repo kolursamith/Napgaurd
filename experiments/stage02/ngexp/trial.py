@@ -30,7 +30,15 @@ from pathlib import Path
 from typing import Any
 
 from . import model, verify
-from .backends import Backend, BackendStepError, Criu, Dmtcp, Session
+from .backends import (
+    CONTROLLED_TRIAL_CLASSES,
+    Backend,
+    BackendStepError,
+    Criu,
+    Dmtcp,
+    Session,
+    workload_socket_fds,
+)
 from .results import Check, Status, overall
 from .runner import (
     PERSISTENT_FS,
@@ -44,6 +52,8 @@ from .runner import (
     environment,
     git_revision,
     listener_violations,
+    new_non_loopback,
+    run_dir_processes,
     running_group_members,
     sha256_file,
     utc_now,
@@ -97,6 +107,8 @@ class Options:
     dmtcp_prefix: Path | None = None
     criu_bin: Path | None = None
     criu_mode: str = "unprivileged"
+    # ADR 0004 (proposed): one controlled DMTCP trial of class c-single, per invocation only.
+    dmtcp_controlled_trial: bool = False
     run_on_s: float = 4.0
     observe_s: float = 3.0
 
@@ -108,6 +120,8 @@ class TrialState:
     checks: list[Check] = field(default_factory=list)
     facts: dict[str, Any] = field(default_factory=dict)
     sessions: list[Session] = field(default_factory=list)
+    # Non-loopback listeners present before the experiment started anything (proto, local).
+    baseline_listeners: set[tuple[str, str]] | None = None
 
     def add(self, check: Check) -> Check:
         self.checks.append(check)
@@ -128,7 +142,7 @@ def new_run_dir(run_root: Path, label: str) -> Path:
 
 def make_backend(opts: Options, rec: Recorder) -> Backend:
     if opts.backend == "dmtcp":
-        return Dmtcp(rec, opts.dmtcp_prefix)
+        return Dmtcp(rec, opts.dmtcp_prefix, controlled_trial=opts.dmtcp_controlled_trial)
     if opts.backend == "criu":
         return Criu(rec, opts.criu_bin, opts.criu_mode)
     raise ValueError(f"unknown backend {opts.backend!r}")
@@ -252,6 +266,8 @@ def launch_and_checkpoint(state: TrialState, opts: Options, wc: WorkloadClass,
                     facts={"nonce": started[0].nonce, "pid": started[0].pid,
                            "kpid": started[0].kpid}))
 
+    if opts.dmtcp_controlled_trial:
+        check_controlled_workload(state, session)
     before = model.read_reports(report)
     lower = max_counters(before)
     request_line = model.count_lines(report)
@@ -294,6 +310,49 @@ def launch_and_checkpoint(state: TrialState, opts: Options, wc: WorkloadClass,
     return (artifacts, marks) if fs_ok and original_dead else None
 
 
+def controlled_trial_refusal(opts: Options, entry: str) -> str | None:
+    """Why the ADR 0004 exception does not apply here, or None if it does / is not requested."""
+    if not opts.dmtcp_controlled_trial:
+        return None
+    if entry != "trial":
+        return f"the ADR 0004 controlled-trial exception is for `trial` only, not `{entry}`"
+    if opts.backend != "dmtcp":
+        return "the ADR 0004 controlled-trial exception applies to the DMTCP backend only"
+    if opts.workload_class not in CONTROLLED_TRIAL_CLASSES:
+        return (f"class {opts.workload_class!r} is not allowed under ADR 0004 "
+                f"(allowed: {', '.join(CONTROLLED_TRIAL_CLASSES)})")
+    return None
+
+
+def check_controlled_workload(state: TrialState, session: Session) -> None:
+    """ADR 0004 preconditions before checkpointing: one process, no workload sockets."""
+    pid = session.workload.ident.pid
+    members = {m.ident.pid for m in running_group_members(pid)}
+    sockets = workload_socket_fds(pid)
+    state.facts["controlled_trial_precheck"] = {"group_members": sorted(members),
+                                                "workload_sockets": sockets}
+    if members != {pid}:
+        raise BackendStepError(f"controlled trial requires a single process; group {pid} has "
+                               f"{sorted(members)}")
+    if sockets:
+        raise BackendStepError(f"controlled trial requires no workload sockets (restore would "
+                               f"open an INADDR_ANY listener); found {sockets}")
+    state.add(Check("controlled-trial preconditions", Status.PASS,
+                    f"single process {pid}; no workload sockets (DMTCP fds 820-859 excluded)"))
+
+
+def wait_for_roles_guarded(state: TrialState, path: Path, roles: Sequence[str], start_line: int,
+                           count: int, timeout: float, step: str) -> bool:
+    """wait_for_roles, re-auditing listeners about every 0.5 s while waiting."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        guard_network(state, step)
+        if wait_for_roles(path, roles, start_line, count, timeout=0.5):
+            return True
+    guard_network(state, step)
+    return wait_for_roles(path, roles, start_line, count, timeout=0)
+
+
 def restore_and_verify(state: TrialState, opts: Options, wc: WorkloadClass, backend: Backend,
                        artifacts: ArtifactSet, marks: dict[str, Any]) -> None:
     report = state.run_dir / "reports" / "managed.txt"
@@ -307,7 +366,8 @@ def restore_and_verify(state: TrialState, opts: Options, wc: WorkloadClass, back
         state.sessions.append(session)
     if restore_check.status is not Status.PASS:
         return
-    if not wait_for_roles(report, wc.roles, kill_line, 3, timeout=30):
+    if not wait_for_roles_guarded(state, report, wc.roles, kill_line, 3, timeout=30,
+                                  step="restore (waiting)"):
         restored = model.read_reports(report, kill_line)
         state.add(Check("restored workload reporting", Status.FAIL,
                         f"{len(restored)} observations within 30 s of restore"))
@@ -330,9 +390,14 @@ def restore_and_verify(state: TrialState, opts: Options, wc: WorkloadClass, back
 def finish(state: TrialState, backend: Backend) -> None:
     backend.cleanup(state.sessions)
     survivors = state.rec.cleanup()
+    # Independent leak scan: any live process of this user that still references the run
+    # directory (e.g. a restored workload that was never adopted). Reported, never killed.
+    leaked = [f"pid {p.ident.pid}" for p in run_dir_processes(state.run_dir)]
+    problems = survivors + [f"untracked {item}" for item in leaked]
     state.add(Check("experiment processes cleaned up",
-                    Status.PASS if not survivors else Status.FAIL,
-                    "all tracked processes gone" if not survivors else f"still alive: {survivors}"))
+                    Status.PASS if not problems else Status.FAIL,
+                    "all tracked processes gone; no process references the run directory"
+                    if not problems else f"still alive: {problems}"))
 
 
 def guard_network(state: TrialState, step: str) -> None:
@@ -349,6 +414,13 @@ def guard_network(state: TrialState, step: str) -> None:
         state.rec.cleanup()
         raise BackendStepError(f"after {step}: listener audit failed, stopping: {exc}") from exc
     exposed = listener_violations(listeners, pids)
+    if state.baseline_listeners is None:
+        state.rec.cleanup()
+        raise BackendStepError(f"after {step}: no listener baseline; refusing to continue")
+    # Ownership-independent check: a restored process outside the run's sessions (not
+    # adopted) would not be in `pids`, so any NEW non-loopback listener also aborts.
+    exposed += [lst for lst in new_non_loopback(listeners, state.baseline_listeners)
+                if lst not in exposed]
     if exposed:
         state.rec.event("network_exposure", step=step, listeners=[e.__dict__ for e in exposed])
         state.rec.cleanup()
@@ -359,11 +431,18 @@ def guard_network(state: TrialState, step: str) -> None:
 # --------------------------------------------------------------- entrypoints
 
 
-def prelude(opts: Options, label: str) -> tuple[TrialState, WorkloadClass, Backend] | Status:
+def prelude(opts: Options, label: str,
+            entry: str = "trial") -> tuple[TrialState, WorkloadClass, Backend] | Status:
     wc = CLASSES[opts.workload_class]
     run_dir = new_run_dir(opts.run_root, label)
     state = TrialState(run_dir, Recorder(run_dir))
     state.facts["class_note"] = wc.note
+    refusal = controlled_trial_refusal(opts, entry)
+    if refusal is not None:
+        state.add(Check("ADR 0004 exception scope", Status.BLOCKED, refusal))
+        return write_result(state, opts, entry)
+    if opts.dmtcp_controlled_trial:
+        state.facts["adr_0004_controlled_trial"] = True
     if wc.kind == "none":
         state.add(Check("workload class", Status.SKIP, wc.note))
         return write_result(state, opts, "trial")
@@ -373,11 +452,19 @@ def prelude(opts: Options, label: str) -> tuple[TrialState, WorkloadClass, Backe
     state.facts["backend_version"] = backend.version
     if overall(state.checks) is not Status.PASS:
         return write_result(state, opts, "trial")
+    try:
+        state.baseline_listeners = {(lst.proto, lst.local) for lst in current_listeners()
+                                    if not lst.loopback}
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        state.add(Check("listener baseline", Status.BLOCKED,
+                        f"cannot audit listeners, refusing to start: {exc}"))
+        return write_result(state, opts, entry)
+    state.facts["baseline_non_loopback_listeners"] = sorted(state.baseline_listeners)
     return state, wc, backend
 
 
-def run_trial(opts: Options) -> Status:
-    prepared = prelude(opts, f"{opts.backend}-{opts.workload_class}")
+def run_trial(opts: Options, entry: str = "trial") -> Status:
+    prepared = prelude(opts, f"{opts.backend}-{opts.workload_class}", entry)
     if isinstance(prepared, Status):
         return prepared
     state, wc, backend = prepared
@@ -399,7 +486,8 @@ def run_matrix(opts: Options, classes: Sequence[str]) -> Status:
     results: dict[str, Status] = {}
     for name in classes:
         print(f"\n======== {opts.backend} / {name}")
-        results[name] = run_trial(Options(**{**asdict(opts), "workload_class": name}))
+        results[name] = run_trial(Options(**{**asdict(opts), "workload_class": name}),
+                                  entry="matrix")
     print("\n### Matrix")
     for name, result in results.items():
         print(f"{result:<7}  {opts.backend} / {name} — {CLASSES[name].note}")
@@ -407,7 +495,7 @@ def run_matrix(opts: Options, classes: Sequence[str]) -> Status:
 
 
 def reboot_prepare(opts: Options) -> Status:
-    prepared = prelude(opts, f"reboot-{opts.backend}-{opts.workload_class}")
+    prepared = prelude(opts, f"reboot-{opts.backend}-{opts.workload_class}", "reboot-prepare")
     if isinstance(prepared, Status):
         return prepared
     state, wc, backend = prepared

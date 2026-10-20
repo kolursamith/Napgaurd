@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from ngexp import backends, runner
+from ngexp import backends, cli, runner, trial
 from ngexp.results import Check, Status
 
 linux_only = pytest.mark.skipif(platform.system() != "Linux", reason="needs Linux /proc")
@@ -267,8 +267,6 @@ def fake_dmtcp_prefix(tmp_path: Path) -> Path:
 @linux_only
 @pytest.mark.parametrize("entry", ["trial", "matrix", "reboot-prepare"])
 def test_dmtcp_trial_matrix_and_reboot_gates_stay_closed(tmp_path: Path, entry: str) -> None:
-    from ngexp import trial
-
     opts = trial.Options(backend="dmtcp", workload_class="c-single", run_root=tmp_path / "runs",
                          dmtcp_prefix=fake_dmtcp_prefix(tmp_path))
     opts.run_root.mkdir()
@@ -322,3 +320,171 @@ def test_build_script_uses_bounded_jobs_and_rejects_unknown_arguments(tmp_path: 
     assert 'make -j"$JOBS"' in text and 'make -j"$(nproc)"' not in text
     done = run_build_script(tmp_path, None, "--build-now")
     assert done.returncode == 2 and "unknown argument" in done.stderr
+
+
+# ------------------------------------------------- ADR 0004 controlled-trial exception
+
+
+def controlled_opts(tmp_path: Path, **overrides: object) -> trial.Options:
+    values: dict[str, object] = {"backend": "dmtcp", "workload_class": "c-single",
+                                 "run_root": tmp_path, "dmtcp_controlled_trial": True}
+    values.update(overrides)
+    return trial.Options(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "entry", "reason"),
+    [
+        ({}, "matrix", "for `trial` only"),
+        ({}, "reboot-prepare", "for `trial` only"),
+        ({"backend": "criu"}, "trial", "DMTCP backend only"),
+        ({"workload_class": "c-threads"}, "trial", "not allowed under ADR 0004"),
+        ({"workload_class": "c-child"}, "trial", "not allowed under ADR 0004"),
+        ({"workload_class": "py"}, "trial", "not allowed under ADR 0004"),
+        ({"workload_class": "tcp"}, "trial", "not allowed under ADR 0004"),
+    ],
+)
+def test_controlled_trial_exception_is_narrow(tmp_path: Path, overrides: dict[str, object],
+                                              entry: str, reason: str) -> None:
+    refusal = trial.controlled_trial_refusal(controlled_opts(tmp_path, **overrides), entry)
+    assert refusal is not None and reason in refusal
+
+
+def test_controlled_trial_exception_allows_only_dmtcp_c_single_trial(tmp_path: Path) -> None:
+    assert trial.controlled_trial_refusal(controlled_opts(tmp_path), "trial") is None
+    off = controlled_opts(tmp_path, dmtcp_controlled_trial=False)
+    assert trial.controlled_trial_refusal(off, "matrix") is None  # not requested: normal gates
+    assert trial.Options(backend="dmtcp", workload_class="c-single",
+                         run_root=tmp_path).dmtcp_controlled_trial is False
+
+
+def test_controlled_trial_flag_exists_only_on_trial() -> None:
+    args = cli.parser().parse_args(["trial", "--backend", "dmtcp", "--adr-0004-controlled-trial"])
+    assert args.dmtcp_controlled_trial is True
+    assert cli.parser().parse_args(["trial", "--backend", "dmtcp"]).dmtcp_controlled_trial is False
+    for other in (["matrix", "--backend", "dmtcp"], ["reboot-prepare", "--backend", "dmtcp"],
+                  ["dmtcp-isolation-check"]):
+        with pytest.raises(SystemExit):
+            cli.parser().parse_args([*other, "--adr-0004-controlled-trial"])
+
+
+def test_global_gate_unchanged_and_exception_is_per_instance(tmp_path: Path) -> None:
+    assert backends.DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED is False
+    assert fake_dmtcp(tmp_path).probe().status is Status.BLOCKED
+    allowed = fake_dmtcp(tmp_path / "x")
+    tools = fake_dmtcp_prefix(tmp_path / "tools") / "bin"
+    allowed.tools = backends.DmtcpTools(*(str(tools / n) for n in (
+        "dmtcp_launch", "dmtcp_command", "dmtcp_coordinator", "dmtcp_restart")))
+    allowed.controlled_trial = True
+    assert allowed.probe().status is Status.PASS  # 4.2.0 reported by the fake tools
+    assert fake_dmtcp(tmp_path / "y").controlled_trial is False
+
+
+def test_controlled_trial_still_requires_the_analysed_version(tmp_path: Path) -> None:
+    dmtcp = fake_dmtcp(tmp_path)
+    dmtcp.controlled_trial = True
+    dmtcp.version = "dmtcp_launch (DMTCP) 4.3.0"
+    with pytest.raises(backends.BackendStepError, match="analysed for DMTCP 4.2.0"):
+        dmtcp.launch(["/bin/sleep", "30"])
+    assert dmtcp.rec.tracked == []
+
+
+@linux_only
+def test_workload_socket_detection_ignores_only_dmtcp_protected_fds(tmp_path: Path) -> None:
+    child_src = (
+        "import os, socket, sys, time\n"
+        "s = socket.socket()\n"
+        "if sys.argv[1] == 'protected':\n"
+        "    os.dup2(s.fileno(), 821); s.close()\n"
+        "print('ready', flush=True); time.sleep(30)\n"
+    )
+    for mode, expect_sockets in (("protected", False), ("workload", True)):
+        proc = subprocess.Popen([sys.executable, "-c", child_src, mode], stdout=subprocess.PIPE,
+                                text=True, start_new_session=True)
+        try:
+            assert proc.stdout is not None and proc.stdout.readline().strip() == "ready"
+            assert any(fd == 821 for fd, _ in runner.socket_fds(proc.pid)) is (mode == "protected")
+            assert bool(backends.workload_socket_fds(proc.pid)) is expect_sockets
+        finally:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+
+
+def test_controlled_probe_refuses_unanalysed_dmtcp_version(tmp_path: Path) -> None:
+    dmtcp = fake_dmtcp(tmp_path)  # /usr/bin/true: reports no version
+    dmtcp.controlled_trial = True
+    check = dmtcp.probe()
+    assert check.status is Status.BLOCKED and "covers DMTCP 4.2.0 only" in check.detail
+
+
+def test_new_non_loopback_listener_is_detected_regardless_of_owner() -> None:
+    before = runner.parse_ss_listeners("LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n")
+    baseline = {(lst.proto, lst.local) for lst in before if not lst.loopback}
+    after = runner.parse_ss_listeners(
+        "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n"
+        "LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*\n"
+        "LISTEN 0 128 0.0.0.0:41000 0.0.0.0:*\n")  # no visible owner
+    assert [lst.local for lst in runner.new_non_loopback(after, baseline)] == ["0.0.0.0:41000"]
+
+
+def guard_state(tmp_path: Path, baseline: set[tuple[str, str]] | None) -> trial.TrialState:
+    state = trial.TrialState(tmp_path, runner.Recorder(tmp_path))
+    state.baseline_listeners = baseline
+    return state
+
+
+def test_guard_refuses_without_a_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(trial, "current_listeners", lambda: [])
+    with pytest.raises(backends.BackendStepError, match="no listener baseline"):
+        trial.guard_network(guard_state(tmp_path, None), "launch")
+
+
+def test_guard_aborts_on_new_unowned_wildcard_listener(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    listeners = runner.parse_ss_listeners("LISTEN 0 128 [::]:41000 [::]:*\n")
+    monkeypatch.setattr(trial, "current_listeners", lambda: listeners)
+    with pytest.raises(backends.BackendStepError, match=r"listening beyond loopback.*\[::\]:41000"):
+        trial.guard_network(guard_state(tmp_path, set()), "restore (waiting)")
+    # A listener that already existed before the trial (e.g. sshd) does not abort it.
+    trial.guard_network(guard_state(tmp_path, {("tcp", "[::]:41000")}), "restore (waiting)")
+
+
+@linux_only
+def test_leak_scan_finds_untracked_processes_of_the_run(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    (run_dir / "bin").mkdir(parents=True)
+    sleeper = run_dir / "bin" / "sleeper"
+    sleeper.write_bytes(Path("/bin/sleep").read_bytes())
+    sleeper.chmod(0o700)
+    proc = subprocess.Popen([str(sleeper), "30"], start_new_session=True)
+    try:
+        assert runner.wait_until(lambda: any(p.ident.pid == proc.pid
+                                             for p in runner.run_dir_processes(run_dir)), 5)
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    assert not any(p.ident.pid == proc.pid for p in runner.run_dir_processes(run_dir))
+
+
+CONTROLLED_SCRIPT = Path(__file__).resolve().parents[2] / "experiments" / "stage02" / \
+    "ubuntu-controlled-trial.sh"
+
+
+@pytest.mark.parametrize("args", [[], ["abc"], ["A" * 40], ["a" * 40, "--go"],
+                                  ["a" * 40, "--run-trial", "extra"]])
+def test_controlled_trial_script_rejects_bad_arguments(args: list[str]) -> None:
+    done = subprocess.run(["bash", str(CONTROLLED_SCRIPT), *args], capture_output=True,
+                          text=True, timeout=30)
+    assert done.returncode == 2 and "usage:" in done.stderr
+
+
+def test_controlled_trial_script_runs_trial_only_when_explicitly_requested() -> None:
+    text = CONTROLLED_SCRIPT.read_text(encoding="utf-8")
+    assert text.count("--adr-0004-controlled-trial") == 2  # usage comment + the one invocation
+    gated = text.split('if [ "$RUN_TRIAL" = 1 ]; then', 1)[1].split("\nfi\n", 1)[0]
+    assert "--adr-0004-controlled-trial" in gated
+    # Every prerequisite before the trial is a hard stop (BLOCKED), and nothing uses sudo.
+    before = text.split('if [ "$RUN_TRIAL" = 1 ]; then', 1)[0]
+    assert before.count("|| blocked") >= 5
+    assert "sudo" not in text.replace("No sudo", "")

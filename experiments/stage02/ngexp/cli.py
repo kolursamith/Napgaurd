@@ -36,6 +36,10 @@ def parser() -> argparse.ArgumentParser:
     t.add_argument("--backend", choices=["dmtcp", "criu"], required=True)
     t.add_argument("--class", dest="workload_class", choices=sorted(trial.CLASSES),
                    default="c-single")
+    t.add_argument("--adr-0004-controlled-trial", dest="dmtcp_controlled_trial",
+                   action="store_true",
+                   help="run ONE DMTCP c-single trial under the proposed ADR 0004 exception "
+                        "(requires explicit approval; loopback hand-off and listener audits)")
 
     m = sub.add_parser("matrix", help="run trials for several workload classes")
     m.add_argument("--backend", choices=["dmtcp", "criu"], required=True)
@@ -116,7 +120,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "env":
         status = cmd_env(args)
     elif args.command == "trial":
-        status = trial.run_trial(opts(args.workload_class))
+        options = opts(args.workload_class)
+        options.dmtcp_controlled_trial = bool(args.dmtcp_controlled_trial)
+        status = trial.run_trial(options)
     elif args.command == "matrix":
         status = trial.run_matrix(opts(), args.classes)
     elif args.command == "reboot-prepare":
