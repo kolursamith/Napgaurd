@@ -1,6 +1,6 @@
 # ADR 0005: Checkpoint Backend Selection (Provisional)
 
-- Status: **Proposed; acceptance requested with the Stage 02 closure decision.** It closes open decision OD-01 provisionally. Updated 2026-10-20 with the full Stage 02 evidence.
+- Status: **Accepted** by the project owner on 2026-10-20 (closure decision on commit `1890a1ed36b500050c1a4c517cc280ee4a473ff4`): pinned DMTCP 4.2.0 is the **provisional** primary backend. It closes open decision OD-01 provisionally. CRIU remains untested (OD-14). Updated 2026-10-20 with the full Stage 02 evidence.
 - Date: 2026-10-20
 - Related: [Stage 02 report](../phases/STAGE-02-report.md) (sections B, C, I, N, S, T, U), [ADR 0004](0004-stage02-dmtcp-loopback-coordinator-exception.md), [backend contract](../architecture/checkpoint-backend.md)
 - Requirements: CMP-001, CMP-002, SEC-002, SEC-010, PLT-001, PLT-009, LIM-003
@@ -54,5 +54,5 @@ These findings stand and must be resolved, or explicitly accepted by a later ADR
 - **Revisited 2026-10-20** (all three triggers occurred): cross-reboot evidence exists (`c-single`), three more classes are verified, and DMTCP failed `py`. The decision is unchanged.
   - The `py` failure narrows the supported scope. It does not invalidate DMTCP for native single-process workloads.
   - It becomes a CMP-006 compatibility rule in Stage 03 (ADR 0006).
-- **Acceptance requested:** the owner accepts this ADR as part of the Stage 02 closure decision (Stage 02 report section AB.5).
+- **Accepted** by the owner with the Stage 02 closure decision (Stage 02 report section AC).
 - This ADR is revisited again if DMTCP is upgraded, if the `py` root cause is found, or if CRIU's privilege question (OD-14) is decided.

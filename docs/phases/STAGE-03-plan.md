@@ -1,9 +1,9 @@
 # Stage 03 Plan: Backend Integration
 
-- Status: **Plan only. Implementation has not started.**
+- Status: **Stage 03a approved** by the project owner on 2026-10-20 (closure decision on commit `1890a1ed36b500050c1a4c517cc280ee4a473ff4`), under [ADR 0006](../decisions/0006-stage03-dmtcp-backend-integration-and-coordinator-security.md) (accepted, limited to developer mode on the single-user VM). Implementation is on branch `stage-03/backend-integration`. **Stage 03a is NOT passed** until the Ubuntu self-test passes. Stage 03b is not approved.
 - Date: 2026-10-20
 - Entry gate:
-  - **Not yet satisfied.** Every Stage 02 trial has been executed, and Stage 02 is ready for the owner's closure decision ([Stage 02 report section AB](STAGE-02-report.md#ab-final-stage-02-evidence-compatibility-matrix-and-closure-readiness)):
+  - **Satisfied** (owner decision 2026-10-20; [Stage 02 report section AC](STAGE-02-report.md#ac-owner-closure-decision-2026-10-20)). Before the decision, every Stage 02 trial had been executed and Stage 02 was ready for the owner's closure decision ([Stage 02 report section AB](STAGE-02-report.md#ab-final-stage-02-evidence-compatibility-matrix-and-closure-readiness)):
     - VERIFIED PASS: `c-single` (same boot and cross-reboot), `c-threads`, `c-file-static`, `c-file-grow`;
     - VERIFIED FAIL: `py`;
     - BLOCKED: `c-child`, `tcp`, `gui`.

@@ -3,7 +3,7 @@
 - Date: 2026-10-19
 - Baseline: Stage 01 PASS (user-reported) at `39714383fcd9b683f367e7476882bfb7102adaa3` on `stage-01/requirements-design`
 - Branch: `stage-02/checkpoint-feasibility`, created from the approved Stage 01 commit. The commit SHA is recorded in Git history and the Ubuntu logs.
-- Verdict: **READY FOR OWNER CLOSURE DECISION (section AB); Stage 02 NOT formally closed until the owner approves.** DMTCP 4.2.0 on Ubuntu ARM64:
+- Verdict: **CLOSED: PASS with recorded limitations** (owner decision, 2026-10-20; [section AC](#ac-owner-closure-decision-2026-10-20)). DMTCP 4.2.0 on Ubuntu ARM64:
   - **VERIFIED PASS:** `c-single` (same boot and cross-reboot), `c-threads`, `c-file-static`, and `c-file-grow`. `c-file-grow` carries the LIM-007 observation.
   - **VERIFIED FAIL:** `py` (2 of 2 restores; SIGSEGV; root cause unknown).
   - **BLOCKED BY POLICY:** `c-child`, `tcp`, `gui`.
@@ -1017,3 +1017,25 @@ Gate table: criterion, evidence, result, and remaining risk (AGENTS.md rule 12).
 > 6. records that ADR 0004 and its amendments expire at closure, and that no coordinator runs through `src/napguard` until ADR 0006 is approved.
 
 **Smallest optional action, not blocking:** run the read-only `python3 -I experiments/stage02/run_stage02.py summarize` on Ubuntu, so the run IDs for `c-threads` and both `py` trials, and the precise PRF-003 values, can be transcribed. It runs no experiment.
+
+## AC. Owner closure decision (2026-10-20)
+
+The project owner approved the Stage 02 closure decisions documented at commit `1890a1ed36b500050c1a4c517cc280ee4a473ff4` (section AB.5):
+
+1. **ADR 0005 accepted:** pinned DMTCP 4.2.0 is the provisional primary backend.
+2. **PLT-009 substitute self-check accepted** for the Stage 02 environment: the version pin plus `dmtcp-isolation-check`.
+3. **LIM-003 accepted**, together with the policy-blocked `c-child`, `tcp`, and `gui` classes. CRIU remains untested.
+4. **Python 3.12 restoration recorded as a verified compatibility failure:** two attempts; the diagnostic retest crashed with SIGSEGV.
+5. **LIM-007 accepted:** process restoration does not guarantee external filesystem rollback.
+6. **ADR 0004 and all its experimental amendments expired** at Stage 02 closure.
+
+**Stage 02 verdict: CLOSED, PASS with recorded limitations.**
+
+The owner also approved [ADR 0006](../decisions/0006-stage03-dmtcp-backend-integration-and-coordinator-security.md) **only for Stage 03a developer-mode implementation** on the isolated single-user Ubuntu ARM64 VM. This does not authorize:
+
+- production coordinator use;
+- background daemon integration;
+- general multi-user use;
+- unrestricted Linux application support.
+
+The `experiments/stage02` harness constants are unchanged (`DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED = False`, `CONTROLLED_TRIAL_CLASSES = ("c-single",)`). Since ADR 0004 has expired, they no longer authorize any trial.

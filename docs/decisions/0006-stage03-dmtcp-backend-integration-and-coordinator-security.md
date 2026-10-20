@@ -1,6 +1,6 @@
 # ADR 0006: Stage 03 DMTCP Backend Integration and Coordinator Security (Developer Use Only)
 
-- Status: **Proposed. Owner approval requested.** No code exists for it yet. Stage 03 implementation starts only after Stage 02 is formally closed, [ADR 0005](0005-checkpoint-backend-selection.md) is accepted, and this ADR is approved.
+- Status: **Accepted (limited)** by the project owner on 2026-10-20 (closure decision on commit `1890a1ed36b500050c1a4c517cc280ee4a473ff4`), **only for Stage 03a developer-mode implementation** on the isolated single-user Ubuntu ARM64 VM. It does **not** authorize production coordinator use, background daemon integration, general multi-user use, or unrestricted Linux application support. Stage 03b and later stages need their own approvals.
 - Date: 2026-10-20
 - Scope: **Stage 03 (backend integration) developer use** through `src/napguard` on the single-user Ubuntu 24.04 aarch64 UTM VM. **It does not authorize production use**, the daemon (Stage 06), or any network- or IPC-reachable checkpoint function.
 - Supersedes: nothing. [ADR 0004](0004-stage02-dmtcp-loopback-coordinator-exception.md) (Stage 02 experiments only) expires at Stage 02 closure. This ADR carries its technical conditions forward but **not its authorization**.
