@@ -173,6 +173,16 @@ def workload_argv(state: TrialState, wc: WorkloadClass, report: Path, label: str
     return [sys.executable, str(HERE / "workload" / "ngcounter.py"), *common]
 
 
+def held_file(state: TrialState, wc: WorkloadClass) -> Path | None:
+    return state.run_dir / "held.txt" if "--hold-file" in wc.args else None
+
+
+def file_snapshot(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        return {"exists": False}
+    return {"exists": True, "size": path.stat().st_size, "sha256": sha256_file(path)}
+
+
 def by_role(observations: Sequence[model.Observation]) -> dict[str, list[model.Observation]]:
     grouped: dict[str, list[model.Observation]] = {}
     for obs in observations:
@@ -280,6 +290,9 @@ def launch_and_checkpoint(state: TrialState, opts: Options, wc: WorkloadClass,
     if ckpt_check.status is not Status.PASS:
         return None
     done_line = model.count_lines(report)
+    held = held_file(state, wc)
+    if held is not None:
+        state.facts["held_file_at_checkpoint"] = file_snapshot(held)
     if not wait_for_roles(report, wc.roles, done_line, 1, timeout=15):
         state.add(Check("workload continued after checkpoint", Status.FAIL,
                         "no new observations within 15 s of the checkpoint (FR-011)"))
@@ -297,6 +310,8 @@ def launch_and_checkpoint(state: TrialState, opts: Options, wc: WorkloadClass,
     original = model.read_reports(report)
     kill = max_counters(original)
     kill_line = model.count_lines(report)
+    if held is not None:
+        state.facts["held_file_at_kill"] = file_snapshot(held)
     state.add(Check("original terminated", Status.PASS if original_dead else Status.FAIL,
                     f"counters at termination {kill}"))
 
@@ -380,6 +395,14 @@ def restore_and_verify(state: TrialState, opts: Options, wc: WorkloadClass, back
     time.sleep(opts.observe_s)
     restored = model.read_reports(report, kill_line)
     state.facts["restore_to_first_report_s"] = round(time.monotonic() - started - opts.observe_s, 3)
+    held = held_file(state, wc)
+    if held is not None:
+        after = file_snapshot(held)
+        state.add(verify.verify_held_file(
+            class_name=wc.name, nonce=str(marks["nonce"]),
+            at_checkpoint=dict(state.facts.get("held_file_at_checkpoint", {})),
+            at_kill=dict(state.facts.get("held_file_at_kill", {})), after_restore=after,
+            text_after=held.read_text(encoding="utf-8", errors="replace") if held.is_file() else ""))
     for role in wc.roles:
         state.add(verify.verify_restore(
             role=role, original=original,
@@ -734,3 +757,40 @@ def dmtcp_isolation_check(run_root: Path, dmtcp_prefix: Path | None) -> Status:
     state.facts["trial_gate"] = ("closed: DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED is False; "
                                  "a PASS here is evidence for OD-13, not permission to run trials")
     return write_result(state, opts, "dmtcp-isolation-check")
+
+
+def summarize_runs(run_root: Path) -> list[dict[str, Any]]:
+    """Read-only extraction of recorded evidence (PRF-001..003, continuity) from result.json.
+
+    Reports only values present in the files; anything missing is None, never estimated.
+    """
+    rows: list[dict[str, Any]] = []
+    for result_path in sorted(run_root.glob("*/result.json")):
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            rows.append({"run": result_path.parent.name, "error": str(exc)})
+            continue
+        checks: dict[str, dict[str, Any]] = {str(c.get("name")): c
+                                              for c in result.get("checks", [])}
+        ckpt: dict[str, Any] = checks.get("native checkpoint created", {}).get("facts", {})
+        images = ckpt.get("images") or []
+        empty: dict[str, Any] = {}
+        cont: dict[str, Any] = next(
+            (c for n, c in checks.items() if n.startswith("restored state continuity")),
+            empty).get("facts", {})
+        facts = result.get("facts", {})
+        rows.append({
+            "run": result_path.parent.name, "kind": result.get("kind"),
+            "status": result.get("status"), "backend": result.get("backend"),
+            "class": result.get("workload_class"),
+            "checkpoint_s": ckpt.get("duration_s"),
+            "image_bytes": sum(int(i.get("size", 0)) for i in images) if images else None,
+            "artifact_total_bytes": facts.get("artifact_total_bytes"),
+            "restore_to_first_report_s": facts.get("restore_to_first_report_s"),
+            "nonce": cont.get("nonce"), "kill_counter": cont.get("kill_counter"),
+            "restored_first_counter": cont.get("restored_first_counter"),
+            "restored_last_counter": cont.get("restored_last_counter"),
+            "git_head": (result.get("git") or {}).get("head"),
+        })
+    return rows

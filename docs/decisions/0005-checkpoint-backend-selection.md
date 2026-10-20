@@ -9,7 +9,7 @@
 
 Stage 02 had to establish whether any backend can genuinely checkpoint and restore an unmodified process on the target, Ubuntu 24.04 aarch64 in UTM.
 
-- **DMTCP 4.2.0** was built from pinned source as an ordinary user. In one controlled trial it checkpointed and restored the `c-single` workload **in the same boot**. The restored process showed the original nonce and resumed from the checkpoint window (counter 40, after termination at 450), then advanced. Evidence: Stage 02 report section T (user-reported).
+- **DMTCP 4.2.0** was built from pinned source as an ordinary user. In one controlled trial it checkpointed and restored the `c-single` workload **in the same boot**. The restored process showed the original nonce and resumed from the checkpoint window (counter 40, after termination at 450), then advanced. Evidence: Stage 02 report section T (user-reported). The same class was then **restored across a full VM power cycle**. The boot ID changed, the artifacts were SHA-256-intact, the original nonce was preserved, and the counter went from 430 to 40 and then advanced. Evidence: section W.
 - **CRIU 4.2.1** was not run. As an ordinary user under Ubuntu's Yama `ptrace_scope=1`, it needs `CAP_CHECKPOINT_RESTORE` and `CAP_SYS_PTRACE` on its binary, or root. Either option is root-equivalent and conflicts with SEC-010 (OD-14).
 
 ## Decision (proposed)
@@ -18,8 +18,8 @@ Stage 02 had to establish whether any backend can genuinely checkpoint and resto
 
 The selection is **provisional and scoped**:
 
-- It is verified for `c-single`, same boot, one trial.
-- Cross-reboot restore and the other workload classes are not verified (Stage 02 report section U).
+- It is verified for `c-single`: one same-boot trial and one cross-reboot trial.
+- Other workload classes are not verified (Stage 02 report section X).
 - Support claims follow CMP-002: only for (DMTCP 4.2.0, aarch64, a verified class).
 
 ## DMTCP is not production-safe

@@ -157,3 +157,61 @@ def verify_restore(
         f"and advanced to {last.counter}",
         facts=facts,
     )
+
+
+# ------------------------------------------------------------- held-file classes (LIM-007)
+
+
+def held_file_lines(text: str) -> tuple[str | None, list[model.Observation], int]:
+    """(header line, parseable NGSTATE lines, count of torn/unparseable lines)."""
+    lines = text.splitlines()
+    header = lines[0] if lines and lines[0].startswith("NGHOLD v1 ") else None
+    parsed: list[model.Observation] = []
+    torn = 0
+    for number, line in enumerate(lines[1 if header else 0 :], start=2 if header else 1):
+        try:
+            obs = model.parse_line(line, number)
+        except model.MalformedReport:
+            obs = None
+        if obs is None:
+            torn += 1
+        else:
+            parsed.append(obs)
+    return header, parsed, torn
+
+
+def verify_held_file(*, class_name: str, nonce: str, at_checkpoint: dict[str, object],
+                     at_kill: dict[str, object], after_restore: dict[str, object],
+                     text_after: str) -> Check:
+    """c-file-static: the open file must be byte-identical across checkpoint and restore.
+
+    c-file-grow: the workload keeps appending through an fd opened without O_APPEND, so
+    what DMTCP does with the file offset on restore is RECORDED (LIM-007), not judged.
+    """
+    header, parsed, torn = held_file_lines(text_after)
+    drops = [(a.counter, b.counter) for a, b in zip(parsed, parsed[1:], strict=False) if b.counter < a.counter]
+    facts: dict[str, object] = {
+        "at_checkpoint": at_checkpoint, "at_kill": at_kill, "after_restore": after_restore,
+        "header_ok": header == f"NGHOLD v1 nonce={nonce}", "ngstate_lines": len(parsed),
+        "torn_lines": torn, "counter_drops": drops[:10],
+        "foreign_nonce_lines": sum(1 for o in parsed if o.nonce != nonce),
+    }
+    if class_name == "c-file-static":
+        unchanged = (after_restore.get("sha256") == at_checkpoint.get("sha256")
+                     == at_kill.get("sha256") and bool(after_restore.get("exists")))
+        ok = unchanged and facts["header_ok"] and not parsed and not torn
+        return Check("held file consistency (c-file-static)", Status.PASS if ok else Status.FAIL,
+                     "held file byte-identical at checkpoint, at termination and after restore"
+                     if ok else "held file changed or header lost across checkpoint/restore",
+                     facts=facts)
+    if after_restore.get("size") == at_kill.get("size") and not drops:
+        observed = "file not written after restore"
+    elif drops and torn:
+        observed = ("restored writes landed at the checkpoint-time offset, overwriting "
+                    "post-checkpoint data (torn lines present)")
+    elif drops:
+        observed = "restored writes resumed at the checkpoint-time offset (counter rewind)"
+    else:
+        observed = "restored writes appended after the pre-termination data"
+    return Check("held file behaviour (c-file-grow, LIM-007 observation)", Status.PASS,
+                 observed, mandatory=False, facts=facts)

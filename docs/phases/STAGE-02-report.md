@@ -3,13 +3,12 @@
 - Date: 2026-10-19
 - Baseline: Stage 01 PASS (user-reported) at `39714383fcd9b683f367e7476882bfb7102adaa3` on `stage-01/requirements-design`
 - Branch: `stage-02/checkpoint-feasibility`, created from the approved Stage 01 commit. The commit SHA is recorded in Git history and the Ubuntu logs.
-- Verdict: **IN PROGRESS — same-boot checkpoint/restore VERIFIED PASS on Ubuntu (DMTCP 4.2.0, `c-single`, section T); stage NOT complete.**
-  - Cross-reboot restoration: NOT TESTED.
+- Verdict: **FEASIBILITY DEMONSTRATED; Stage 02 NOT formally complete.** DMTCP 4.2.0 `c-single` checkpoint/restore is **VERIFIED PASS on Ubuntu ARM64, both same-boot (section T) and cross-reboot (section W)**.
   - Other workload classes: NOT VERIFIED.
   - Production coordinator security: NOT APPROVED (ADR 0004 is Stage 02-only).
-  - Remaining mandatory criteria: section U.
+  - Evidence matrix and closure table: section X.
 
-Stage 02 PASS needs Ubuntu ARM64 evidence that a backend checkpoints and restores a real running process with its execution state preserved, in the same boot and across a VM reboot. Section T records the first same-boot evidence (user-reported); cross-reboot evidence does not exist yet. No checkpoint experiment was run on macOS.
+Stage 02 PASS needs Ubuntu ARM64 evidence that a backend checkpoints and restores a real running process with its execution state preserved, in the same boot and across a VM reboot. Section T records the same-boot evidence and section W the cross-reboot evidence (both user-reported). No checkpoint experiment was run on macOS.
 
 Labels used below:
 
@@ -303,7 +302,7 @@ Status on Ubuntu 24.04 aarch64 (UTM): every execution cell is **NOT RUN**.
 | Python | documented | documented |
 | TCP / GUI | not tested in Stage 02 (SKIP) | not tested in Stage 02 (SKIP) |
 | Same-boot restore on VM | **PASS for `c-single` only** (section T); other classes not run | **NOT RUN** (privileges, OD-14) |
-| Cross-reboot restore on VM | **NOT TESTED** | **NOT RUN** |
+| Cross-reboot restore on VM | **PASS for `c-single` only** (section W) | **NOT RUN** |
 
 ## I. Security and privilege findings
 
@@ -406,11 +405,11 @@ If none of these work, Stage 02 is BLOCKED and the target environment must be re
 | Harness, workload, and unit tests | `experiments/stage02/`, `tests/unit/test_stage02_*.py`, section F | DONE (Mac) |
 | A backend installs on Ubuntu 24.04 aarch64 | `build-dmtcp.sh` (DMTCP 4.2.0, pinned source), user-reported | PASS (DMTCP) |
 | Genuine checkpoint and restore with preserved in-memory state (same boot) | run `20261020T093355Z-dmtcp-c-single-7bce`, `TRIAL_EXIT=0` (section T) | **PASS (DMTCP, c-single only)** |
-| Cross-reboot restore | `reboot-resume` `result.json` PASS | **NOT TESTED** (needs an ADR 0004 amendment; section U) |
+| Cross-reboot restore | run `20261020T100428Z-reboot-dmtcp-c-single-ed7a`, `PREPARE_EXIT=0`, `RESUME_EXIT=0` (section W) | **PASS (DMTCP, c-single only)** |
 
 | No DMTCP coordinator exposed on the network | harness refusal + `test_stage02_safety.py` | ENFORCED (refuses to start) |
 
-**Stage 02: IN PROGRESS.** Same-boot DMTCP `c-single` checkpoint/restore is VERIFIED PASS (section T). The mandatory criteria still open are listed in section U, and the stage is not complete. Stage 03 implementation has not started; its plan is in [STAGE-03-plan.md](STAGE-03-plan.md).
+**Stage 02: feasibility demonstrated, not formally complete.** DMTCP `c-single` checkpoint/restore is VERIFIED PASS both same-boot (section T) and cross-reboot (section W). Closure needs the owner decisions in section X. Stage 03 implementation has not started; its plan is in [STAGE-03-plan.md](STAGE-03-plan.md).
 
 ## N. DMTCP coordinator isolation investigation (OD-13)
 
@@ -665,7 +664,7 @@ These are user-reported results from 2026-10-20. Claude has not reviewed the raw
 | Approved criterion | Source | Status |
 |---|---|---|
 | Real checkpoint → terminate → restore, with proven state continuity | roadmap Stage 02 gate | **MET** (same boot, `c-single`) |
-| Cross-reboot restore verified before full acceptance | Stage 02 brief and blueprint stage plan | **OPEN** |
+| Cross-reboot restore verified before full acceptance | Stage 02 brief and blueprint stage plan | **MET** for `c-single` (section W) |
 | CMP-001: matrix over 7 representative classes | requirements | **OPEN:** 1/7 run. `tcp` and `gui` are deliberately blocked (I-1c, EXC-001), so the matrix needs recorded "blocked by design" entries for them. |
 | LIM-003: TCP behaviour measured | requirements | **DECIDED: LIMITED/BLOCKED finding.** TCP restore behaviour was **not measured**, because a TCP workload would make DMTCP 4.2.0 open an `INADDR_ANY` restore listener (I-1c). Socket-holding workloads are unsupported under DMTCP until a safe method exists. This is a recorded limitation, **not** feature support. |
 | LIM-007: file changed after checkpoint | requirements | **OPEN** (`c-file-static`, `c-file-grow` not run) |
@@ -746,4 +745,83 @@ cd ~/napguard && bash experiments/stage02/ubuntu-controlled-trial.sh <SHA> --reb
 - **Resume:** `system rebooted since checkpoint` (a different boot ID), `checkpoint artifacts intact after reboot`, `same backend build as before reboot`, every `post-reboot isolation: …` check, `restore command started`, `restored state continuity (main)` (pre-reboot nonce, counter in the pre-reboot window), and `experiment processes cleaned up`, all PASS.
 - **Network:** no new non-loopback listeners after either boot.
 
-**Status: cross-reboot restoration NOT TESTED.**
+**Status: run once on Ubuntu, VERIFIED PASS. See section W.**
+
+## W. Cross-reboot checkpoint/restore: VERIFIED PASS (DMTCP 4.2.0, c-single)
+
+These are user-reported results from 2026-10-20, from a run on Ubuntu 24.04.5 ARM64 at commit `55905be43fcf67ad1effd2dd5d17e5d1b6c57867` under ADR 0004 Amendment 1. Claude has not reviewed the raw evidence files.
+
+| Phase | Observed |
+|---|---|
+| Prepare (boot 1) | **PASS**, `PREPARE_EXIT=0`. Checkpoint image 25,050,848 bytes. Verified checkpoint completion 1.23 s. Original terminated. All coordinators stopped before reboot. Manifest persisted and synced. |
+| Boot IDs | before `6ee8d6d4-3c1c-4b0c-a3ef-baf04ba89a4c`, after `ed8b9cf5-5112-4051-866e-9ef5f5d42afe` (a real reboot) |
+| Resume (boot 2) | **PASS**, `RESUME_EXIT=0` |
+| Integrity | all 3 persistent artifacts matched their pre-reboot SHA-256; backend version and tool hashes unchanged |
+| Isolation | fresh post-reboot coordinator isolation PASS; no new non-loopback listeners |
+| State continuity | original nonce `389daf1268d15b31f429f7688645ce90` preserved. Counter 430 at termination, **40 after restore** (rolled back into the checkpoint window, not 0), then advanced to 340. |
+| Cleanup | PASS; no leftover DMTCP or workload processes |
+| Evidence (VM) | `~/.local/share/napguard-stage02/runs/20261020T100428Z-reboot-dmtcp-c-single-ed7a` |
+
+**Finding.** This is genuine **cross-reboot restoration of execution state**. A process image checkpointed before a full VM power cycle was restored after it, from persistent ext4, and continued from checkpointed memory. **It is limited to the tested `c-single` workload** (one trial). No restore duration is stated here; see section X for how to extract one.
+
+## X. Evidence matrix, closure table, and approvals
+
+### Evidence matrix
+
+States: VERIFIED PASS, VERIFIED FAIL, BLOCKED (with documented reason), NOT TESTED.
+
+| Item | Requirement or decision text (short) | State | Evidence or reason |
+|---|---|---|---|
+| Same-boot genuine checkpoint/restore | roadmap Stage 02 gate | **VERIFIED PASS** (c-single) | section T |
+| Cross-reboot genuine checkpoint/restore | Stage 02 brief | **VERIFIED PASS** (c-single) | section W |
+| PLT-009 | backend self-check recorded at startup | **VERIFIED PASS (substitute check)** | DMTCP has no self-check command. The substitute is `dmtcp_launch --version` = 4.2.0 plus `dmtcp-isolation-check` PASS (sections O, T, W). It covers version and network confinement, not kernel features. **The owner must accept the substitute.** |
+| PRF-001 | checkpoint duration recorded | **VERIFIED PASS** (2 trials) | 1.21 s (same boot), 1.23 s (cross-reboot): verified completion time, user-reported |
+| PRF-002 | image size recorded | **VERIFIED PASS** (2 trials) | 25,059,040 B and 25,050,848 B, user-reported |
+| PRF-003 | restore duration recorded | **NOT TESTED (not yet extracted)** | The harness records `restore_to_first_report_s` (restore command start to first restored report, an **upper bound** on restore time) in `result.json` on the VM. The value has not been reported. Extract it with `run_stage02.py summarize`. |
+| CMP-001 `c-single` | compatibility matrix | **VERIFIED PASS** | sections T, W |
+| CMP-001 `c-threads`, `py`, `c-file-static` | compatibility matrix | **NOT TESTED** | not authorised by ADR 0004; harness and checks ready (Amendment 2, proposed) |
+| CMP-001 `c-file-grow` | compatibility matrix | **NOT TESTED** | as above; it doubles as the LIM-007 probe |
+| CMP-001 `c-child` | compatibility matrix | **BLOCKED** | multi-process; the single-process precheck refuses it, and multi-process restore and cleanup need a separate review |
+| CMP-001 `tcp` | compatibility matrix | **BLOCKED** | DMTCP 4.2.0 opens an `INADDR_ANY` restore listener for workload sockets (I-1c) |
+| CMP-001 `gui` | compatibility matrix | **BLOCKED** | X11/Wayland sockets (I-1c) and out of scope (EXC-001); not implemented |
+| LIM-003 | TCP behaviour reported | **BLOCKED** | recorded as a limited finding: not measured, because measuring it safely is impossible under I-1c |
+| LIM-007 | changed open files after checkpoint | **NOT TESTED** | `c-file-static` / `c-file-grow` await Amendment 2. The held-file consistency checks are implemented. |
+| OD-01 backend selection | blueprint deliverable | **BLOCKED (awaiting owner approval)** | [ADR 0005](../decisions/0005-checkpoint-backend-selection.md) drafted (Proposed): DMTCP provisional, CRIU the alternative, not production-safe |
+
+### Closure table
+
+| Mandatory exit criterion | Evidence | Verdict | Required action |
+|---|---|---|---|
+| Real checkpoint → terminate → restore with proven state continuity | sections T, W | **MET** | none |
+| Cross-reboot restore before full acceptance | section W | **MET** | none |
+| Backend decision recorded | ADR 0005 | open | owner accepts ADR 0005 |
+| CMP-001 compatibility matrix | matrix above | **partial** | either approve Amendment 2 and run 4 classes, **or** accept `c-single`-only coverage with the rest recorded NOT TESTED or BLOCKED |
+| LIM-003 TCP | I-1c | BLOCKED | owner accepts it as a limitation |
+| LIM-007 changed files | none yet | NOT TESTED | Amendment 2 (`c-file-static`, `c-file-grow`) **or** owner accepts NOT TESTED |
+| PLT-009 self-check | version + isolation | PASS (substitute) | owner accepts the substitute |
+| PRF-001, PRF-002 | 2 trials | PASS | none |
+| PRF-003 | on the VM only | NOT TESTED | run the read-only `summarize` and report the value |
+
+**Feasibility is demonstrated. Stage 02 is not formally complete** until the owner either accepts the open items above as limitations, or approves and runs Amendment 2.
+
+### Approvals needed before each further experiment
+
+| Experiment | Needs |
+|---|---|
+| `summarize` (read-only) | nothing (reads `result.json` only) |
+| Linux-only test suites (`pytest`) | nothing (native processes only, no DMTCP coordinator) |
+| `dmtcp-isolation-check` | nothing new (already approved; fail-closed) |
+| `c-threads`, `py`, `c-file-static`, `c-file-grow` same-boot trials | **ADR 0004 Amendment 2 approval**, then a one-line change to `CONTROLLED_TRIAL_CLASSES` plus a `--class` option in `ubuntu-controlled-trial.sh` |
+| Any of those across a reboot | a further amendment (not proposed) |
+| `c-child`, `tcp`, `gui`, CRIU | not proposed; separate design and security review (I-1c, OD-14) |
+
+### Safe test preparation implemented (no new experiment run)
+
+- **Held-file consistency** (`verify.verify_held_file`). For `c-file-static`, the held file must be byte-identical at checkpoint, at termination, and after restore; this check is mandatory. For `c-file-grow`, the behaviour (append, rewind, or overwrite with torn lines) is recorded as a LIM-007 observation and does not decide the class verdict; state continuity does.
+- **Snapshots** of the held file at checkpoint completion, at termination, and after restore are stored in `result.json`.
+- **`run_stage02.py summarize`**: read-only extraction of checkpoint seconds, image bytes, `restore_to_first_report_s`, and continuity counters from every `result.json`. Missing values print as `-`, never as estimates.
+- **Tests** (`tests/unit/test_stage02_classes.py`):
+  - the four classes are still refused for `trial` and both reboot entries;
+  - held-file verifier cases;
+  - the summary reports only recorded values and writes nothing;
+  - **Linux-only:** each Amendment 2 class, run natively without DMTCP, is a single process with no workload sockets and valid digests. The static file stays unchanged and the growing file grows. `c-child` would be refused by the single-process precheck.

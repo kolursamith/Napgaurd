@@ -65,6 +65,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--adr-0004-controlled-trial", dest="dmtcp_controlled_trial",
                    action="store_true", help=adr_help)
 
+    z = sub.add_parser("summarize", help="read-only: tabulate recorded evidence from result.json")
+    z.add_argument("--json", action="store_true", help="print JSON instead of a table")
+
     sub.add_parser("dmtcp-isolation-check",
                    help="start ONE DMTCP coordinator on a pre-bound 127.0.0.1 listener, prove it "
                         "is unreachable from other addresses, stop it (no workload, no checkpoint)")
@@ -118,6 +121,18 @@ def cmd_env(args: argparse.Namespace) -> Status:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.command == "summarize":  # read-only; safe on any host
+        rows = trial.summarize_runs(args.run_root)
+        if args.json:
+            print(json.dumps(rows, indent=2, sort_keys=True))
+        else:
+            keys = ("run", "kind", "status", "class", "checkpoint_s", "image_bytes",
+                    "restore_to_first_report_s", "kill_counter", "restored_first_counter",
+                    "restored_last_counter")
+            print("\t".join(keys))
+            for row in rows:
+                print("\t".join("-" if row.get(k) is None else str(row.get(k)) for k in keys))
+        return EXIT_CODES[Status.PASS if rows else Status.SKIP]
     if platform.system() != "Linux":
         print(f"BLOCKED: Stage 02 experiments run only on Linux (this is {platform.system()}).")
         return EXIT_CODES[Status.BLOCKED]

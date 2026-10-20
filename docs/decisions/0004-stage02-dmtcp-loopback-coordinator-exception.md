@@ -1,6 +1,6 @@
 # ADR 0004: Stage 02-Only DMTCP Coordinator Exception via a Pre-Bound Loopback Listener
 
-- Status: **Accepted (limited)** for the same-boot `c-single` diagnostic, which was executed on 2026-10-20 at commit `f0f6599976f5a7fdeefd8f51413821c5d2606516` with the user's approval. **Amendment 1 (cross-reboot) is Proposed**; it is not to be run until the user explicitly approves the first cross-reboot test.
+- Status: **Accepted (limited)** for the same-boot `c-single` diagnostic, which was executed on 2026-10-20 at commit `f0f6599976f5a7fdeefd8f51413821c5d2606516` with the user's approval. **Amendment 1 (cross-reboot `c-single`) is Accepted (limited)**: approved by the user and executed once on 2026-10-20 at commit `55905be43fcf67ad1effd2dd5d17e5d1b6c57867`, VERIFIED PASS (Stage 02 report section W). **Amendment 2 (four more classes, same boot) is Proposed and not approved.**
 - Amended: 2026-10-20 (scope split; Amendment 1)
 - Date: 2026-10-19
 - Scope: **Stage 02 feasibility experiments only.** It does not apply to NapGuard production (Stages 03–12).
@@ -12,8 +12,9 @@
 | Scope | Status | What it covers |
 |---|---|---|
 | **Approved** | executed once; **VERIFIED PASS** (Stage 02 report section T) | `trial --backend dmtcp --class c-single --adr-0004-controlled-trial`: a same-boot checkpoint/restore diagnostic under every condition below |
-| **Proposed (Amendment 1)** | implemented; **not yet run**, needs explicit approval for the first run | `reboot-prepare` and `reboot-resume` with `--backend dmtcp --class c-single --adr-0004-controlled-trial`, with the extra conditions in "Amendment 1" |
-| **Prohibited** | refused by the harness or by this ADR | production use (any NapGuard daemon, CLI, or GUI outside `experiments/stage02`); TCP or any socket-holding workload; multi-user hosts or use by anyone other than the single VM user; every other workload class (`c-threads`, `py`, `c-file-*`, `c-child`, `tcp`, `gui`); `matrix`; CRIU under this exception; any DMTCP version other than 4.2.0 |
+| **Approved (Amendment 1)** | executed once; **VERIFIED PASS** (Stage 02 report section W) | `reboot-prepare` and `reboot-resume` with `--backend dmtcp --class c-single --adr-0004-controlled-trial`, with the extra conditions in "Amendment 1" |
+| **Proposed (Amendment 2)** | **not approved**; harness and checks prepared, refused today | same-boot `trial` for `c-threads`, `py`, `c-file-static`, `c-file-grow` (see "Amendment 2") |
+| **Prohibited** | refused by the harness or by this ADR | production use (any NapGuard daemon, CLI, or GUI outside `experiments/stage02`); TCP or any socket-holding workload; multi-user hosts or use by anyone other than the single VM user; every other workload class (`c-child`, `tcp`, `gui`, and the Amendment 2 classes until approved); `matrix`; CRIU under this exception; any DMTCP version other than 4.2.0 |
 
 ## Context
 
@@ -60,7 +61,7 @@ Allow **exactly one controlled experiment shape** to start a DMTCP coordinator, 
 10. **No other change:** no sudo, capabilities, sysctl, AppArmor, or firewall change. No TCP, multi-process, GUI, or reboot experiment.
 11. **Procedure:** `experiments/stage02/ubuntu-controlled-trial.sh <SHA>` runs every prerequisite and stops with BLOCKED at the first failure. It runs the trial only when `--run-trial` is given explicitly.
 
-## Amendment 1: cross-reboot `c-single` (proposed)
+## Amendment 1: cross-reboot `c-single` (accepted, executed)
 
 These are in addition to conditions 1–11 above, which apply to both phases.
 
@@ -83,6 +84,35 @@ These are in addition to conditions 1–11 above, which apply to both phases.
    - a **fresh `dmtcp-isolation-check`** passes in the new boot.
 
    The restore then uses a new loopback hand-off coordinator, with IPv4 and IPv6 listener audits during and after restore. Success requires the **pre-reboot nonce and a counter inside the pre-reboot checkpoint window**, plus valid digests, an intact ballast, and progress. Cleanup and the leak scan must pass. A passing resume is marked, and a second resume of the same run is refused.
+
+## Amendment 2: four more single-process classes, same boot (PROPOSED, NOT APPROVED)
+
+**Scope:** `trial --backend dmtcp --class {c-threads | py | c-file-static | c-file-grow} --adr-0004-controlled-trial`, **same boot only**. One run per class, each started explicitly by the user.
+
+**Conditions:** every ADR 0004 condition (1–11) applies unchanged:
+
+- DMTCP 4.2.0;
+- the fail-closed loopback hand-off, with fresh isolation in the same boot;
+- precheck: **one process, no workload sockets**;
+- verified checkpoint completion (expected images = 1);
+- original termination confirmed;
+- listener audits (baseline diff plus ownership, IPv4 and IPv6) throughout;
+- the leak scan.
+
+**Per class:**
+
+- `c-threads`: continuity must pass for **every** role (`main`, `t0`–`t2`). It exercises multi-thread restore on ARM64, where an aarch64 TODO exists in DMTCP's restart path (B4).
+- `py`: continuity and the 1 MiB ballast must pass. The interpreter must still satisfy the no-socket precheck at checkpoint time.
+- `c-file-static`: the held file must be **byte-identical** at checkpoint, at termination, and after restore (mandatory).
+- `c-file-grow`: the held-file behaviour is **recorded** as a LIM-007 observation (append, rewind, or overwrite). The class verdict is decided by state continuity. A restore failure caused by the changed file is recorded as a finding, not retried.
+
+**Explicitly excluded:** reboot runs of these classes, `c-child`, `tcp`, `gui`, `matrix`, and CRIU.
+
+**Enabling, after approval only:**
+
+- set `CONTROLLED_TRIAL_CLASSES` to the five approved classes;
+- add `--class` to `ubuntu-controlled-trial.sh` (restricted to the same list);
+- update the tests that pin the current scope (`test_only_c_single_is_authorised`, `test_amendment_2_classes_are_still_refused`).
 
 ## Consequences
 

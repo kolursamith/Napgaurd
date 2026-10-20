@@ -3,8 +3,8 @@
 - Status: **Plan only. Implementation has not started.**
 - Date: 2026-10-20
 - Entry gate:
-  - **Not yet satisfied.** Stage 02 is IN PROGRESS: same-boot DMTCP `c-single` is verified, but the mandatory criteria in [Stage 02 report section U](STAGE-02-report.md#u-stage-02-completion-assessment) are still open.
-  - Implementation starts only after Stage 02 is approved and this plan is approved.
+  - **Not yet satisfied.** Stage 02 feasibility is demonstrated: DMTCP `c-single` is VERIFIED PASS both same-boot and cross-reboot. But Stage 02 is not formally closed; see the owner decisions in [Stage 02 report section X](STAGE-02-report.md#x-evidence-matrix-closure-table-and-approvals).
+  - Implementation starts only after Stage 02 is closed, ADR 0005 is accepted, ADR 0006 is approved, and this plan is approved.
 - Roadmap definition ([traceability](../requirements/traceability.md#approved-stage-roadmap)): **Stage 03 = backend integration: checkpoint API, adapter, capability detection, CLI.** Gate: *real operations work through NapGuard's API.*
 - **Out of scope:**
 
@@ -17,6 +17,23 @@
   | Power and sleep | 08 |
   | Recovery manager | 09 |
   | GUI | 10 |
+
+## First implementation slice (Stage 03a), in this order
+
+Each step is a separate, reviewable commit on a new branch `stage-03/backend-integration` created from the approved Stage 02 commit. Each step comes with unit tests.
+
+1. **Backend Protocol and data types** (`checkpoint/base.py`): the Stage 01 contract (`probe`, `assess`, `launch`, `status`, `checkpoint`, `restore`, `cancel`, `cleanup`) as a `typing.Protocol`; frozen dataclasses; `ErrorCode` (StrEnum) and `BackendError`. No Linux calls.
+2. **Capability detection** (`checkpoint/dmtcp.py: probe`, `checkpoint/criu.py: probe`): find the tools, record absolute paths, the version (`dmtcp_launch --version` only), and tool SHA-256s. `verified=True` only for (4.2.0, aarch64, `c-single`). CRIU is probe-only.
+3. **DMTCP adapter with deny-by-default coordinator policy** (`checkpoint/policy.py`, `checkpoint/dmtcp.py`, `core/proc.py`, `core/netaudit.py`):
+   - `CoordinatorPolicy()` refuses by default;
+   - `CoordinatorPolicy.experimental_single_user(...)` is required to start the fail-closed loopback hand-off coordinator;
+   - ported, reviewed process identity and listener audits.
+4. **Checkpoint completion verification** (`checkpoint/dmtcp_completion.py`): port of `ngexp/ckptwait.py`, with the restart script, a stable image, no `.temp`, peers RUNNING, and a deadline.
+5. **Restore-state validation**: `restore()` returns a `RestoredSession` and never claims success. The selftest verifies continuity through the API (nonce, rollback window, digests, ballast, progress).
+6. **Structured backend errors**: every failure maps to an `ErrorCode`, with `retryable` and a structured `detail` (evidence reason, listings, status, coordinator log lines).
+7. **Developer CLI and tests** (`cli.py`, console script `napguard-dev`): `backend probe`, `backend assess`, and `backend selftest --i-accept-single-user-coordinator`. Plus `scripts/stage03-ubuntu-check.sh`.
+
+**Not in Stage 03a:** supervisor or registry (05), SQLite catalog (04), daemon or IPC (06), GUI (10), scheduler (07), power/battery (08), recovery manager (09).
 
 ## Requirements delivered in Stage 03
 
