@@ -48,7 +48,7 @@ This overview stays the high-level summary. The detailed Stage 01 design lives i
 - [Storage and recovery design](storage-recovery.md)
 - [Power and sleep design](power-sleep.md)
 - [IPC and security design](ipc-security.md)
-- Decisions: [ADR 0001](../decisions/0001-technology-stack.md), [ADR 0002](../decisions/0002-ipc-protocol-and-authentication.md), [ADR 0003](../decisions/0003-checkpoint-publication-and-catalog-durability.md), [ADR 0004 (proposed, Stage 02 only)](../decisions/0004-stage02-dmtcp-loopback-coordinator-exception.md)
+- Decisions: [ADR 0001](../decisions/0001-technology-stack.md), [ADR 0002](../decisions/0002-ipc-protocol-and-authentication.md), [ADR 0003](../decisions/0003-checkpoint-publication-and-catalog-durability.md), [ADR 0004 (Stage 02 only)](../decisions/0004-stage02-dmtcp-loopback-coordinator-exception.md), [ADR 0005 (proposed backend selection)](../decisions/0005-checkpoint-backend-selection.md)
 
 ## Architectural invariants
 

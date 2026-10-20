@@ -564,6 +564,14 @@ def boot_id() -> str:
     return read_text("/proc/sys/kernel/random/boot_id")
 
 
+def host_identity() -> dict[str, str]:
+    """Facts a restore must match: CPU architecture and (hashed) machine id."""
+    machine_id = read_text("/etc/machine-id", "")
+    return {"arch": platform.machine(),
+            "machine_id_sha256": hashlib.sha256(machine_id.encode()).hexdigest()
+            if machine_id else "absent"}
+
+
 def kernel_config(option: str) -> str:
     config = Path(f"/boot/config-{platform.release()}")
     try:

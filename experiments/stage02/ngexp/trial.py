@@ -51,6 +51,7 @@ from .runner import (
     current_listeners,
     environment,
     git_revision,
+    host_identity,
     listener_violations,
     new_non_loopback,
     run_dir_processes,
@@ -315,8 +316,9 @@ def controlled_trial_refusal(opts: Options, entry: str) -> str | None:
     """Why the ADR 0004 exception does not apply here, or None if it does / is not requested."""
     if not opts.dmtcp_controlled_trial:
         return None
-    if entry != "trial":
-        return f"the ADR 0004 controlled-trial exception is for `trial` only, not `{entry}`"
+    if entry not in ("trial", *REBOOT_ENTRIES):
+        return (f"the ADR 0004 controlled-trial exception is for `trial`, `reboot-prepare` and "
+                f"`reboot-resume` only, not `{entry}`")
     if opts.backend != "dmtcp":
         return "the ADR 0004 controlled-trial exception applies to the DMTCP backend only"
     if opts.workload_class not in CONTROLLED_TRIAL_CLASSES:
@@ -495,24 +497,45 @@ def run_matrix(opts: Options, classes: Sequence[str]) -> Status:
     return overall(Check(name, result, "") for name, result in results.items())
 
 
+REBOOT_MANIFEST = "reboot-manifest.json"
+RESUME_PASSED_MARK = "reboot-resume.passed"
+REBOOT_ENTRIES = ("reboot-prepare", "reboot-resume")
+
+
+def tool_hashes(backend: Backend) -> dict[str, str]:
+    """SHA-256 of the backend executables, so a restore uses the same engine build."""
+    paths: list[str] = []
+    if isinstance(backend, Dmtcp) and backend.tools is not None:
+        paths = list(backend.tools.__dict__.values())
+    elif isinstance(backend, Criu) and backend.criu is not None:
+        paths = [backend.criu]
+    return {path: sha256_file(Path(path)) for path in paths}
+
+
 def reboot_prepare(opts: Options) -> Status:
     prepared = prelude(opts, f"reboot-{opts.backend}-{opts.workload_class}", "reboot-prepare")
     if isinstance(prepared, Status):
         return prepared
     state, wc, backend = prepared
+    manifest: dict[str, Any] | None = None
     try:
         fresh = fresh_control(state, wc)
         launched = launch_and_checkpoint(state, opts, wc, backend)
         if launched is not None:
             artifacts, marks = launched
             state.add(verify.verify_fresh_control(fresh, str(marks["nonce"])))
-            os.sync()
             manifest = {
                 "created_at": utc_now(),
                 "boot_id": boot_id(),
+                "host": host_identity(),
+                "git_head": git_revision(REPO)["head"],
                 "options": {**asdict(opts), "run_root": str(opts.run_root),
                             "dmtcp_prefix": str(opts.dmtcp_prefix) if opts.dmtcp_prefix else None,
                             "criu_bin": str(opts.criu_bin) if opts.criu_bin else None},
+                "adr_0004_controlled_trial": opts.dmtcp_controlled_trial,
+                "backend_version": backend.version,
+                "tool_sha256": tool_hashes(backend),
+                "nonce": marks["nonce"],
                 "marks": marks,
                 "artifacts": [asdict(a) for a in artifacts.items],
                 "artifact_dir": artifacts.directory,
@@ -521,55 +544,158 @@ def reboot_prepare(opts: Options) -> Status:
                 "workload_binary_sha256": sha256_file(state.run_dir / "bin" / "ngcounter")
                 if wc.kind == "c" else None,
             }
-            (state.run_dir / "reboot-manifest.json").write_text(
-                json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-            os.sync()
-            state.add(Check("reboot manifest written and synced", Status.PASS,
-                            str(state.run_dir / "reboot-manifest.json")))
     except BackendStepError as exc:
         state.add(Check("backend step", Status.FAIL, str(exc)))
     finally:
-        finish(state, backend)
+        finish(state, backend)  # stops every coordinator/workload; leak scan
+    # The manifest is written only after cleanup proved that nothing of the run is left
+    # running, so no coordinator (and no listener) survives into the reboot.
+    if manifest is not None and overall(state.checks) is Status.PASS:
+        coordinators = [t for t in state.rec.tracked if "coordinator" in t.name]
+        still = [t.name for t in coordinators if alive(t.ident)]
+        # DMTCP must have started (and stopped) at least one coordinator; CRIU uses none.
+        expected_some = isinstance(backend, Dmtcp)
+        state.add(Check("all coordinators stopped before reboot",
+                        Status.PASS if not still and (coordinators or not expected_some)
+                        else Status.FAIL,
+                        f"{len(coordinators)} coordinator(s) started, alive now: {still or 'none'}"))
+        if not still:
+            os.sync()
+            (state.run_dir / REBOOT_MANIFEST).write_text(
+                json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+            os.sync()
+            state.add(Check("reboot manifest written and synced", Status.PASS,
+                            str(state.run_dir / REBOOT_MANIFEST)))
     status = write_result(state, opts, "reboot-prepare")
     if status is Status.PASS:
+        flag = " --adr-0004-controlled-trial" if opts.dmtcp_controlled_trial else ""
         print("\nNEXT (only after you decide to reboot; nothing has been rebooted):")
         print("  1. Shut the VM down completely:   sudo systemctl poweroff")
         print("  2. Start it again from UTM, log in as the same user, open a terminal.")
-        print(f"  3. Run: python3 experiments/stage02/run_stage02.py reboot-resume "
+        print(f"  3. Run: python3 -I experiments/stage02/run_stage02.py reboot-resume "
+              f"--backend {opts.backend} --class {opts.workload_class}{flag} "
               f"--run-dir {state.run_dir}")
     return status
 
 
-def reboot_resume(run_dir: Path) -> Status:
-    manifest = json.loads((run_dir / "reboot-manifest.json").read_text(encoding="utf-8"))
+def latest_reboot_run(run_root: Path) -> Path | None:
+    """Newest run directory with a reboot manifest that has not been resumed successfully."""
+    candidates = [m.parent for m in run_root.glob(f"*/{REBOOT_MANIFEST}")
+                  if not (m.parent / RESUME_PASSED_MARK).exists()]
+    return max(candidates, key=lambda d: (d / REBOOT_MANIFEST).stat().st_mtime_ns, default=None)
+
+
+def resume_preconditions(manifest: dict[str, Any], run_dir: Path, *, backend: str,
+                         workload_class: str, controlled: bool, now_boot: str,
+                         host: dict[str, str]) -> list[Check]:
+    """Everything that must hold before a post-reboot restore is attempted (pure)."""
+    checks: list[Check] = []
+    raw = manifest.get("options", {})
+    scope_ok = raw.get("backend") == backend and raw.get("workload_class") == workload_class
+    checks.append(Check("reboot-resume matches the prepared run",
+                        Status.PASS if scope_ok else Status.BLOCKED,
+                        f"prepared {raw.get('backend')}/{raw.get('workload_class')}, "
+                        f"requested {backend}/{workload_class}"))
+    flag_ok = bool(manifest.get("adr_0004_controlled_trial")) == controlled
+    checks.append(Check("ADR 0004 flag matches the prepared run",
+                        Status.PASS if flag_ok else Status.BLOCKED,
+                        f"prepared {bool(manifest.get('adr_0004_controlled_trial'))}, "
+                        f"requested {controlled}"))
+    resumed = (run_dir / RESUME_PASSED_MARK).exists()
+    checks.append(Check("not already resumed", Status.BLOCKED if resumed else Status.PASS,
+                        "a previous reboot-resume of this run passed; a second restore would "
+                        "duplicate the workload" if resumed else "first successful resume"))
+    rebooted = now_boot != manifest.get("boot_id")
+    checks.append(Check("system rebooted since checkpoint",
+                        Status.PASS if rebooted else Status.BLOCKED,
+                        f"boot_id {manifest.get('boot_id')} -> {now_boot}"))
+    same_host = manifest.get("host") == host
+    checks.append(Check("same machine and architecture", Status.PASS if same_host else Status.FAIL,
+                        f"prepared {manifest.get('host')}, now {host}"))
+    arts = manifest.get("artifacts", [])
+    images = [a for a in arts if str(a.get("path", "")).endswith((".dmtcp", ".img"))]
+    missing, modified = [], []
+    for art in arts:
+        path = run_dir / art["path"]
+        if art.get("is_symlink"):
+            if not path.is_symlink():
+                missing.append(art["path"])
+        elif not path.is_file():
+            missing.append(art["path"])
+        elif sha256_file(path) != art["sha256"]:
+            modified.append(art["path"])
+    art_ok = bool(images) and not missing and not modified
+    checks.append(Check("checkpoint artifacts intact after reboot",
+                        Status.PASS if art_ok else Status.FAIL,
+                        f"{len(arts)} artifact(s), {len(images)} image(s); missing {missing}; "
+                        f"modified {modified}" if not art_ok else
+                        f"{len(arts)} artifact(s) match their pre-reboot SHA-256"))
+    expected_bin = manifest.get("workload_binary_sha256")
+    if expected_bin is not None:
+        binary = run_dir / "bin" / "ngcounter"
+        bin_ok = binary.is_file() and sha256_file(binary) == expected_bin
+        checks.append(Check("workload binary unchanged", Status.PASS if bin_ok else Status.FAIL,
+                            str(binary)))
+    return checks
+
+
+def reboot_resume(run_dir: Path | None, run_root: Path, *, backend_name: str | None = None,
+                  workload_class: str | None = None, controlled: bool = False) -> Status:
+    if run_dir is None:
+        run_dir = latest_reboot_run(run_root)
+        if run_dir is None:
+            print(f"BLOCKED: no reboot-prepare run awaiting resume under {run_root}")
+            return Status.BLOCKED
+        print(f"using the newest prepared run: {run_dir}")
+    manifest_path = run_dir / REBOOT_MANIFEST
+    if not manifest_path.is_file():
+        print(f"BLOCKED: {manifest_path} not found (reboot-prepare did not complete)")
+        return Status.BLOCKED
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     raw = manifest["options"]
     opts = Options(backend=raw["backend"], workload_class=raw["workload_class"],
                    run_root=Path(raw["run_root"]),
                    dmtcp_prefix=Path(raw["dmtcp_prefix"]) if raw["dmtcp_prefix"] else None,
                    criu_bin=Path(raw["criu_bin"]) if raw["criu_bin"] else None,
-                   criu_mode=raw["criu_mode"], run_on_s=raw["run_on_s"], observe_s=raw["observe_s"])
+                   criu_mode=raw["criu_mode"], run_on_s=raw["run_on_s"], observe_s=raw["observe_s"],
+                   dmtcp_controlled_trial=controlled)
     wc = CLASSES[opts.workload_class]
     state = TrialState(run_dir, Recorder(run_dir))
     # Restored processes may carry the pre-reboot session ids; adoption additionally
     # requires that they started after the restore command began (not_before_ticks).
     state.rec.sessions.update(int(s) for s in manifest.get("sessions", []))
-    now_boot = boot_id()
-    rebooted = now_boot != manifest["boot_id"]
-    state.add(Check("system rebooted since checkpoint",
-                    Status.PASS if rebooted else Status.BLOCKED,
-                    f"boot_id {manifest['boot_id']} -> {now_boot}"))
-    intact = []
-    for art in manifest["artifacts"]:
-        path = run_dir / art["path"]
-        if art["is_symlink"]:
-            intact.append(path.is_symlink())
-        else:
-            intact.append(path.is_file() and sha256_file(path) == art["sha256"])
-    state.add(Check("checkpoint artifacts intact after reboot",
-                    Status.PASS if intact and all(intact) else Status.FAIL,
-                    f"{sum(intact)}/{len(intact)} artifacts match their pre-reboot SHA-256"))
+    refusal = controlled_trial_refusal(opts, "reboot-resume")
+    if refusal is not None:
+        state.add(Check("ADR 0004 exception scope", Status.BLOCKED, refusal))
+        return write_result(state, opts, "reboot-resume")
+    for check in resume_preconditions(
+            manifest, run_dir, backend=backend_name or opts.backend,
+            workload_class=workload_class or opts.workload_class, controlled=controlled,
+            now_boot=boot_id(), host=host_identity()):
+        state.add(check)
     backend = make_backend(opts, state.rec)
-    state.add(backend.probe())
+    if overall(state.checks) is Status.PASS:
+        state.add(backend.probe())
+    if overall(state.checks) is Status.PASS:
+        same_engine = (backend.version == manifest.get("backend_version")
+                       and tool_hashes(backend) == manifest.get("tool_sha256"))
+        state.add(Check("same backend build as before reboot",
+                        Status.PASS if same_engine else Status.FAIL,
+                        f"version {manifest.get('backend_version')!r} -> {backend.version!r}; "
+                        f"tool hashes {'unchanged' if same_engine else 'differ or missing'}"))
+    if overall(state.checks) is Status.PASS:
+        try:  # fresh listener baseline in the NEW boot
+            state.baseline_listeners = {(lst.proto, lst.local) for lst in current_listeners()
+                                        if not lst.loopback}
+            state.facts["baseline_non_loopback_listeners"] = sorted(state.baseline_listeners)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            state.add(Check("listener baseline", Status.BLOCKED,
+                            f"cannot audit listeners, refusing to restore: {exc}"))
+    if overall(state.checks) is Status.PASS and isinstance(backend, Dmtcp):
+        isolation = backend.isolation_check()  # fresh, in the new boot, before any restore
+        for check in isolation:
+            state.add(Check(f"post-reboot isolation: {check.name}", check.status, check.detail,
+                            facts=check.facts))
     if overall(state.checks) is Status.PASS:
         artifacts = collect_artifacts(Path(manifest["artifact_dir"]), run_dir,
                                       ["ckpt_*.dmtcp", "dmtcp_restart_script*.sh", "*.img"])
@@ -579,7 +705,14 @@ def reboot_resume(run_dir: Path) -> Status:
             state.add(Check("backend step", Status.FAIL, str(exc)))
         finally:
             finish(state, backend)
-    return write_result(state, opts, "reboot-resume")
+    else:
+        state.add(Check("post-reboot restore", Status.SKIP,
+                        "not attempted: a precondition above did not pass"))
+        backend.cleanup(state.sessions)
+    status = write_result(state, opts, "reboot-resume")
+    if status is Status.PASS:
+        (run_dir / RESUME_PASSED_MARK).write_text(utc_now() + "\n", encoding="utf-8")
+    return status
 
 
 def dmtcp_isolation_check(run_root: Path, dmtcp_prefix: Path | None) -> Status:

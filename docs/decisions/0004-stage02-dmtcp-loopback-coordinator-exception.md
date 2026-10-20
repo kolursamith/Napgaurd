@@ -1,10 +1,19 @@
 # ADR 0004: Stage 02-Only DMTCP Coordinator Exception via a Pre-Bound Loopback Listener
 
-- Status: **Proposed. Not accepted.** Nothing may run under this ADR until the user explicitly approves it.
+- Status: **Accepted (limited)** for the same-boot `c-single` diagnostic, which was executed on 2026-10-20 at commit `f0f6599976f5a7fdeefd8f51413821c5d2606516` with the user's approval. **Amendment 1 (cross-reboot) is Proposed**; it is not to be run until the user explicitly approves the first cross-reboot test.
+- Amended: 2026-10-20 (scope split; Amendment 1)
 - Date: 2026-10-19
 - Scope: **Stage 02 feasibility experiments only.** It does not apply to NapGuard production (Stages 03–12).
 - Related: [Stage 02 report](../phases/STAGE-02-report.md) (I-1, I-1a, I-1b, I-1c, section N), [backend contract](../architecture/checkpoint-backend.md), [IPC and security](../architecture/ipc-security.md)
 - Requirements: SEC-001, SEC-002, SEC-010, CMP-001, PLT-009
+
+## Scope
+
+| Scope | Status | What it covers |
+|---|---|---|
+| **Approved** | executed once; **VERIFIED PASS** (Stage 02 report section T) | `trial --backend dmtcp --class c-single --adr-0004-controlled-trial`: a same-boot checkpoint/restore diagnostic under every condition below |
+| **Proposed (Amendment 1)** | implemented; **not yet run**, needs explicit approval for the first run | `reboot-prepare` and `reboot-resume` with `--backend dmtcp --class c-single --adr-0004-controlled-trial`, with the extra conditions in "Amendment 1" |
+| **Prohibited** | refused by the harness or by this ADR | production use (any NapGuard daemon, CLI, or GUI outside `experiments/stage02`); TCP or any socket-holding workload; multi-user hosts or use by anyone other than the single VM user; every other workload class (`c-threads`, `py`, `c-file-*`, `c-child`, `tcp`, `gui`); `matrix`; CRIU under this exception; any DMTCP version other than 4.2.0 |
 
 ## Context
 
@@ -50,6 +59,30 @@ Allow **exactly one controlled experiment shape** to start a DMTCP coordinator, 
 9. **Verified completion:** a checkpoint counts only after the bounded completion wait (Stage 02 report section S): a restart script naming this run's port and image, a stable final image, no temporary file, and peers RUNNING. A command's exit status is never evidence, because `--bcheckpoint` does not block in DMTCP 4.2.0.
 10. **No other change:** no sudo, capabilities, sysctl, AppArmor, or firewall change. No TCP, multi-process, GUI, or reboot experiment.
 11. **Procedure:** `experiments/stage02/ubuntu-controlled-trial.sh <SHA>` runs every prerequisite and stops with BLOCKED at the first failure. It runs the trial only when `--run-trial` is given explicitly.
+
+## Amendment 1: cross-reboot `c-single` (proposed)
+
+These are in addition to conditions 1–11 above, which apply to both phases.
+
+1. **`reboot-prepare`:**
+   - runs the precheck (one process, no workload sockets);
+   - takes the verified checkpoint;
+   - terminates and confirms the death of every original process.
+
+   It then cleans up every experiment process and checks that **every coordinator it started has stopped**. Only after that does it write and `sync` `reboot-manifest.json`. The manifest records the boot ID, the host (architecture and hashed machine id), the nonce and marks, the artifact SHA-256s, the workload binary hash, the DMTCP version and tool hashes, the ADR flag, and the Git HEAD. If anything survives, no manifest is written, so there is nothing to resume.
+2. **The user powers the VM off and on.** Nothing in NapGuard reboots or powers off the machine.
+3. **`reboot-resume`** refuses before any restore (BLOCKED or FAIL) unless all of the following hold:
+   - backend, class, and ADR flag match the manifest;
+   - this run has not already been resumed successfully;
+   - **the boot ID changed**;
+   - same machine and architecture;
+   - every artifact is present with an unchanged SHA-256, and at least one image exists;
+   - the workload binary is unchanged;
+   - the DMTCP version and tool hashes are unchanged;
+   - a **fresh listener baseline** can be taken in the new boot;
+   - a **fresh `dmtcp-isolation-check`** passes in the new boot.
+
+   The restore then uses a new loopback hand-off coordinator, with IPv4 and IPv6 listener audits during and after restore. Success requires the **pre-reboot nonce and a counter inside the pre-reboot checkpoint window**, plus valid digests, an intact ballast, and progress. Cleanup and the leak scan must pass. A passing resume is marked, and a second resume of the same run is refused.
 
 ## Consequences
 

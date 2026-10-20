@@ -667,12 +667,12 @@ These are user-reported results from 2026-10-20. Claude has not reviewed the raw
 | Real checkpoint → terminate → restore, with proven state continuity | roadmap Stage 02 gate | **MET** (same boot, `c-single`) |
 | Cross-reboot restore verified before full acceptance | Stage 02 brief and blueprint stage plan | **OPEN** |
 | CMP-001: matrix over 7 representative classes | requirements | **OPEN:** 1/7 run. `tcp` and `gui` are deliberately blocked (I-1c, EXC-001), so the matrix needs recorded "blocked by design" entries for them. |
-| LIM-003: TCP behaviour measured | requirements | **OPEN, blocked by security:** a TCP workload triggers DMTCP's wildcard restore listener. Proposal: record "not measured, blocked by I-1c" as an accepted Stage 02 limitation (needs your decision). |
+| LIM-003: TCP behaviour measured | requirements | **DECIDED: LIMITED/BLOCKED finding.** TCP restore behaviour was **not measured**, because a TCP workload would make DMTCP 4.2.0 open an `INADDR_ANY` restore listener (I-1c). Socket-holding workloads are unsupported under DMTCP until a safe method exists. This is a recorded limitation, **not** feature support. |
 | LIM-007: file changed after checkpoint | requirements | **OPEN** (`c-file-static`, `c-file-grow` not run) |
 | PRF-001 to PRF-003: durations and sizes recorded per trial | requirements | **PARTIAL:** recorded for one trial (1.21 s, 25 MB). Restore duration is in `result.json`, not yet reported. |
-| PLT-009: engine self-check recorded | requirements | **PARTIAL:** DMTCP has no self-check command. The version and the isolation check are recorded. Proposal: accept `dmtcp_launch --version` plus `dmtcp-isolation-check` as the DMTCP self-check. |
-| Backend decision (ADR, OD-01) | blueprint deliverable | **OPEN.** Not yet written. DMTCP is the evidence-backed choice; CRIU is untested. |
-| ADR 0004 acceptance recorded | ADR 0004 | **OPEN** (status Proposed) |
+| PLT-009: engine self-check recorded | requirements | **DECIDED: LIMITED finding.** DMTCP 4.2.0 has no engine self-check command. The recorded substitute is `dmtcp_launch --version` (pinned 4.2.0) plus a passing `dmtcp-isolation-check`. This checks version and network confinement, **not** kernel feature support. |
+| Backend decision (ADR, OD-01) | blueprint deliverable | **DRAFTED:** [ADR 0005](../decisions/0005-checkpoint-backend-selection.md) (Proposed). DMTCP 4.2.0 is provisionally selected; CRIU is the alternative; DMTCP is not production-safe. |
+| ADR 0004 acceptance recorded | ADR 0004 | **RECORDED:** accepted (limited) for the executed same-boot diagnostic. Amendment 1 (cross-reboot) is proposed. |
 
 **Smallest set to close Stage 02:** a cross-reboot `c-single` trial; a backend-decision ADR; the matrix filled at least for `c-threads`, `py`, and `c-file-static`, with `c-child`, `c-file-grow`, `tcp`, and `gui` recorded as blocked or limited; and your decisions on LIM-003 and PLT-009.
 
@@ -680,7 +680,7 @@ These are user-reported results from 2026-10-20. Claude has not reviewed the raw
 
 Smallest safe change, an **ADR 0004 amendment**:
 
-1. **Allow the flag on the two-phase reboot test.** `--adr-0004-controlled-trial` would also be accepted on `reboot-prepare` and `reboot-resume`, for `dmtcp` + `c-single` only. Every ADR 0004 condition applies to both phases. Today the flag is rejected there by design.
+1. **Allow the flag on the two-phase reboot test.** `--adr-0004-controlled-trial` would also be accepted on `reboot-prepare` and `reboot-resume`, for `dmtcp` + `c-single` only. Every ADR 0004 condition applies to both phases. This is now implemented (section V), but has not yet been run.
 2. **`reboot-prepare`** (pre-reboot boot) does the following:
    - runs the existing launch, the precheck (one process, no sockets), and the verified checkpoint wait;
    - terminates the original and confirms the image is on ext4;
@@ -702,3 +702,48 @@ Smallest safe change, an **ADR 0004 amendment**:
    No other gate changes.
 
 Risk: none beyond ADR 0004, plus a DMTCP restore after reboot depending on absolute paths (binary, report file) that live on persistent ext4 under the run directory.
+
+## V. Cross-reboot preparation (ADR 0004 Amendment 1): implemented, NOT YET RUN
+
+Implementation:
+
+| File | Change |
+|---|---|
+| `ngexp/trial.py` | `controlled_trial_refusal()` now also accepts `reboot-prepare` and `reboot-resume` for `dmtcp`/`c-single` only. `matrix` and everything else are still refused. |
+| `ngexp/trial.py` | `reboot_prepare` writes the manifest **only after** cleanup passed and every coordinator is confirmed stopped |
+| `ngexp/trial.py` | `resume_preconditions()` (pure function) holds the resume gates |
+| `ngexp/trial.py` | `reboot_resume` adds the engine check, a fresh baseline, a fresh isolation check, and the single-resume marker |
+| `ngexp/runner.py` | `host_identity()` returns the architecture and a SHA-256 of `/etc/machine-id` |
+| `ngexp/cli.py` | `--adr-0004-controlled-trial` on `reboot-prepare` and `reboot-resume`; `reboot-resume --backend/--class` (must match the manifest); `--run-dir` optional (newest run not yet resumed) |
+| `ubuntu-controlled-trial.sh` | `--reboot-prepare` and `--reboot-resume` modes. All prerequisites (SHA, clean tree, baseline, Linux security tests with zero skipped, fresh isolation check) rerun in each boot. The script never reboots. |
+
+Regression tests (`tests/unit/test_stage02_reboot.py`, fake backend, any host). Each of these stops the resume **before any restore**:
+
+- unchanged boot ID;
+- missing checkpoint;
+- corrupt checkpoint (one flipped byte);
+- wrong DMTCP version;
+- failed fresh isolation;
+- scope or flag mismatch;
+- already resumed;
+- missing manifest.
+
+Listener exposure during restore aborts the resume. A failed restoration never produces a continuity PASS. A cleanup failure (leaked process) fails the resume. Process identity mismatch (a second process in the group, or a workload socket) stops the checkpoint. `reboot-prepare` writes no manifest if cleanup fails or a coordinator is still alive.
+
+### Ubuntu procedure (stop for review before the first cross-reboot test)
+
+```sh
+cd ~/napguard && git fetch origin && git checkout stage-02/checkpoint-feasibility && git pull --ff-only && git rev-parse HEAD
+# Boot 1: prerequisites + prepare (no reboot happens here)
+bash experiments/stage02/ubuntu-controlled-trial.sh <SHA> --reboot-prepare 2>&1 | tee ~/s02-reboot-prepare.log; echo "EXIT=${PIPESTATUS[0]}"
+# Only if EXIT=0: YOU power off and start the VM again (UTM). Then, in boot 2:
+cd ~/napguard && bash experiments/stage02/ubuntu-controlled-trial.sh <SHA> --reboot-resume 2>&1 | tee ~/s02-reboot-resume.log; echo "EXIT=${PIPESTATUS[0]}"
+```
+
+**Expected evidence.**
+
+- **Prepare:** `controlled-trial preconditions`, `native checkpoint created`, `original terminated`, `all coordinators stopped before reboot`, `reboot manifest written and synced`, and `experiment processes cleaned up`, all PASS.
+- **Resume:** `system rebooted since checkpoint` (a different boot ID), `checkpoint artifacts intact after reboot`, `same backend build as before reboot`, every `post-reboot isolation: …` check, `restore command started`, `restored state continuity (main)` (pre-reboot nonce, counter in the pre-reboot window), and `experiment processes cleaned up`, all PASS.
+- **Network:** no new non-loopback listeners after either boot.
+
+**Status: cross-reboot restoration NOT TESTED.**

@@ -46,13 +46,24 @@ def parser() -> argparse.ArgumentParser:
     m.add_argument("--classes", nargs="+", choices=sorted(trial.CLASSES),
                    default=list(trial.CLASSES))
 
+    adr_help = ("ADR 0004 controlled exception: DMTCP c-single only, loopback hand-off, "
+                "listener audits (requires explicit approval)")
     r = sub.add_parser("reboot-prepare", help="launch, checkpoint, terminate; then reboot manually")
     r.add_argument("--backend", choices=["dmtcp", "criu"], required=True)
     r.add_argument("--class", dest="workload_class", choices=sorted(trial.CLASSES),
                    default="c-single")
+    r.add_argument("--adr-0004-controlled-trial", dest="dmtcp_controlled_trial",
+                   action="store_true", help=adr_help)
 
     s = sub.add_parser("reboot-resume", help="after a reboot: verify artifacts, restore, verify")
-    s.add_argument("--run-dir", type=Path, required=True)
+    s.add_argument("--run-dir", type=Path,
+                   help="prepared run (default: newest run with a manifest not yet resumed)")
+    s.add_argument("--backend", choices=["dmtcp", "criu"],
+                   help="must match the prepared run (default: from its manifest)")
+    s.add_argument("--class", dest="workload_class", choices=sorted(trial.CLASSES),
+                   help="must match the prepared run (default: from its manifest)")
+    s.add_argument("--adr-0004-controlled-trial", dest="dmtcp_controlled_trial",
+                   action="store_true", help=adr_help)
 
     sub.add_parser("dmtcp-isolation-check",
                    help="start ONE DMTCP coordinator on a pre-bound 127.0.0.1 listener, prove it "
@@ -126,9 +137,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "matrix":
         status = trial.run_matrix(opts(), args.classes)
     elif args.command == "reboot-prepare":
-        status = trial.reboot_prepare(opts(args.workload_class))
+        options = opts(args.workload_class)
+        options.dmtcp_controlled_trial = bool(args.dmtcp_controlled_trial)
+        status = trial.reboot_prepare(options)
     elif args.command == "dmtcp-isolation-check":
         status = trial.dmtcp_isolation_check(args.run_root, args.dmtcp_prefix)
     else:
-        status = trial.reboot_resume(args.run_dir)
+        status = trial.reboot_resume(args.run_dir, args.run_root, backend_name=args.backend,
+                                     workload_class=args.workload_class,
+                                     controlled=bool(args.dmtcp_controlled_trial))
     return EXIT_CODES[status]

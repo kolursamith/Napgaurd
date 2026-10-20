@@ -3,6 +3,9 @@
 #
 #   bash experiments/stage02/ubuntu-controlled-trial.sh <EXPECTED_SHA>              # prerequisites only
 #   bash experiments/stage02/ubuntu-controlled-trial.sh <EXPECTED_SHA> --run-trial  # + ONE c-single trial
+#   bash experiments/stage02/ubuntu-controlled-trial.sh <EXPECTED_SHA> --reboot-prepare
+#       (then YOU power the VM off and on; nothing here reboots)
+#   bash experiments/stage02/ubuntu-controlled-trial.sh <EXPECTED_SHA> --reboot-resume
 #
 # Order (stops at the first failure; the trial runs only after every prerequisite passes):
 #   1. HEAD == EXPECTED_SHA, clean working tree
@@ -10,20 +13,28 @@
 #   3. Linux-only Stage 02 security tests: all must run (zero skipped) and pass
 #   4. Listener snapshot BEFORE
 #   5. Fresh dmtcp-isolation-check (same boot)
-#   6. [--run-trial only] trial --backend dmtcp --class c-single --adr-0004-controlled-trial
+#   6. only with a mode flag, ONE of (all --adr-0004-controlled-trial, dmtcp, c-single):
+#        --run-trial       same-boot trial
+#        --reboot-prepare  launch, verified checkpoint, terminate, stop coordinators, manifest
+#        --reboot-resume   (new boot) verify boot id/artifacts/engine, fresh isolation, restore
 #   7. Listener snapshot AFTER: no new non-loopback listener
 #   8. No DMTCP/workload process of this user left
 #   9. Evidence bundle (checkpoint images excluded)
 # No sudo, no installs, no system changes. Exit: 0 PASS, 1 FAIL, 2 BLOCKED.
 set -u
 
-usage() { echo "usage: $0 <EXPECTED_SHA (40 hex)> [--run-trial]" >&2; exit 2; }
+usage() {
+  echo "usage: $0 <EXPECTED_SHA (40 hex)> [--run-trial | --reboot-prepare | --reboot-resume]" >&2
+  exit 2
+}
 EXPECTED=${1:-}
 [[ "$EXPECTED" =~ ^[0-9a-f]{40}$ ]] || usage
-RUN_TRIAL=0
+MODE=none
 case "${2:-}" in
   "") ;;
-  --run-trial) RUN_TRIAL=1 ;;
+  --run-trial) MODE=trial ;;
+  --reboot-prepare) MODE=reboot-prepare ;;
+  --reboot-resume) MODE=reboot-resume ;;
   *) usage ;;
 esac
 [ $# -le 2 ] || usage
@@ -53,7 +64,8 @@ non_loopback() { awk '{print $1" "$5}' "$1" | grep -vE ' (127\.|\[::1\]:|::1:)' 
 [ "$(id -u)" -ne 0 ] || { echo "do not run as root" >&2; exit 2; }
 mkdir -p "$OUT" && chmod 700 "$OUT"
 cd "$REPO" || exit 2
-{ date -Is; uname -a; grep PRETTY_NAME /etc/os-release; python3 --version; } | tee "$OUT/host.txt"
+{ date -Is; uname -a; grep PRETTY_NAME /etc/os-release; python3 --version
+  echo "boot_id=$(cat /proc/sys/kernel/random/boot_id) mode=$MODE"; } | tee "$OUT/host.txt"
 
 step "1. Exact revision and clean tree"
 HEAD_SHA=$(git rev-parse HEAD)
@@ -82,15 +94,28 @@ python3 -I experiments/stage02/run_stage02.py dmtcp-isolation-check > "$OUT/isol
 rc=$?; tail -8 "$OUT/isolation.log"
 [ $rc -eq 0 ] || blocked "dmtcp-isolation-check exit $rc (no checkpoint attempted)"
 
-if [ "$RUN_TRIAL" = 1 ]; then
-  step "6. ONE controlled c-single checkpoint/restore trial (ADR 0004)"
-  python3 -I experiments/stage02/run_stage02.py trial --backend dmtcp --class c-single \
-    --adr-0004-controlled-trial > "$OUT/trial.log" 2>&1
-  rc=$?; tail -20 "$OUT/trial.log"
-  [ $rc -eq 0 ] || failed "trial exit $rc (see trial.log)"
-else
-  step "6. Trial NOT run (pass --run-trial to run it after reviewing steps 1-5)"
-fi
+case "$MODE" in
+  trial)
+    step "6. ONE controlled c-single checkpoint/restore trial (ADR 0004)"
+    python3 -I experiments/stage02/run_stage02.py trial --backend dmtcp --class c-single \
+      --adr-0004-controlled-trial > "$OUT/trial.log" 2>&1
+    rc=$?; tail -20 "$OUT/trial.log"
+    [ $rc -eq 0 ] || failed "trial exit $rc (see trial.log)" ;;
+  reboot-prepare)
+    step "6. Cross-reboot PREPARE: checkpoint, terminate, stop coordinators, write manifest"
+    python3 -I experiments/stage02/run_stage02.py reboot-prepare --backend dmtcp --class c-single \
+      --adr-0004-controlled-trial > "$OUT/trial.log" 2>&1
+    rc=$?; tail -20 "$OUT/trial.log"
+    [ $rc -eq 0 ] || failed "reboot-prepare exit $rc (see trial.log); do NOT reboot for this test" ;;
+  reboot-resume)
+    step "6. Cross-reboot RESUME (new boot): verify, fresh isolation, restore, continuity"
+    python3 -I experiments/stage02/run_stage02.py reboot-resume --backend dmtcp --class c-single \
+      --adr-0004-controlled-trial > "$OUT/trial.log" 2>&1
+    rc=$?; tail -25 "$OUT/trial.log"
+    [ $rc -eq 0 ] || failed "reboot-resume exit $rc (see trial.log)" ;;
+  *)
+    step "6. Nothing run (pass --run-trial, --reboot-prepare or --reboot-resume after reviewing 1-5)" ;;
+esac
 
 step "7. Listener snapshot AFTER"
 listeners > "$OUT/listeners-after.txt"; non_loopback "$OUT/listeners-after.txt" > "$OUT/nonloop-after.txt"

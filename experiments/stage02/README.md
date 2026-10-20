@@ -15,7 +15,7 @@ This is experiment code for Ubuntu 24.04 aarch64 only. It is not NapGuard's prod
 | `ngexp/trial.py` | Trial, matrix, and reboot-prepare/resume orchestration |
 | `run_stage02.py` | Command line |
 | `build-dmtcp.sh`, `build-criu.sh` | Source builds from pinned upstream commits, without sudo |
-| `ubuntu-controlled-trial.sh` | Ordered prerequisite checks plus, only with `--run-trial`, the single ADR 0004 c-single DMTCP trial |
+| `ubuntu-controlled-trial.sh` | Ordered prerequisite checks plus, only with an explicit mode flag, one ADR 0004 c-single DMTCP run: `--run-trial` (same boot), `--reboot-prepare`, or `--reboot-resume` (Amendment 1, proposed) |
 
 ## How a trial proves real restoration
 

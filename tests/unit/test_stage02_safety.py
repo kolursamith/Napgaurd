@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -335,8 +336,8 @@ def controlled_opts(tmp_path: Path, **overrides: object) -> trial.Options:
 @pytest.mark.parametrize(
     ("overrides", "entry", "reason"),
     [
-        ({}, "matrix", "for `trial` only"),
-        ({}, "reboot-prepare", "for `trial` only"),
+        ({}, "matrix", "not `matrix`"),
+        ({}, "dmtcp-isolation-check", "not `dmtcp-isolation-check`"),
         ({"backend": "criu"}, "trial", "DMTCP backend only"),
         ({"workload_class": "c-threads"}, "trial", "not allowed under ADR 0004"),
         ({"workload_class": "c-child"}, "trial", "not allowed under ADR 0004"),
@@ -351,19 +352,20 @@ def test_controlled_trial_exception_is_narrow(tmp_path: Path, overrides: dict[st
 
 
 def test_controlled_trial_exception_allows_only_dmtcp_c_single_trial(tmp_path: Path) -> None:
-    assert trial.controlled_trial_refusal(controlled_opts(tmp_path), "trial") is None
+    for entry in ("trial", "reboot-prepare", "reboot-resume"):
+        assert trial.controlled_trial_refusal(controlled_opts(tmp_path), entry) is None
     off = controlled_opts(tmp_path, dmtcp_controlled_trial=False)
     assert trial.controlled_trial_refusal(off, "matrix") is None  # not requested: normal gates
     assert trial.Options(backend="dmtcp", workload_class="c-single",
                          run_root=tmp_path).dmtcp_controlled_trial is False
 
 
-def test_controlled_trial_flag_exists_only_on_trial() -> None:
-    args = cli.parser().parse_args(["trial", "--backend", "dmtcp", "--adr-0004-controlled-trial"])
-    assert args.dmtcp_controlled_trial is True
-    assert cli.parser().parse_args(["trial", "--backend", "dmtcp"]).dmtcp_controlled_trial is False
-    for other in (["matrix", "--backend", "dmtcp"], ["reboot-prepare", "--backend", "dmtcp"],
-                  ["dmtcp-isolation-check"]):
+def test_controlled_trial_flag_exists_only_on_trial_and_reboot_commands() -> None:
+    for argv in (["trial", "--backend", "dmtcp"], ["reboot-prepare", "--backend", "dmtcp"],
+                 ["reboot-resume", "--backend", "dmtcp", "--class", "c-single"]):
+        assert cli.parser().parse_args([*argv, "--adr-0004-controlled-trial"]).dmtcp_controlled_trial
+        assert cli.parser().parse_args(argv).dmtcp_controlled_trial is False
+    for other in (["matrix", "--backend", "dmtcp"], ["dmtcp-isolation-check"], ["env"]):
         with pytest.raises(SystemExit):
             cli.parser().parse_args([*other, "--adr-0004-controlled-trial"])
 
@@ -481,10 +483,18 @@ def test_controlled_trial_script_rejects_bad_arguments(args: list[str]) -> None:
 
 def test_controlled_trial_script_runs_trial_only_when_explicitly_requested() -> None:
     text = CONTROLLED_SCRIPT.read_text(encoding="utf-8")
-    assert text.count("--adr-0004-controlled-trial") == 2  # usage comment + the one invocation
-    gated = text.split('if [ "$RUN_TRIAL" = 1 ]; then', 1)[1].split("\nfi\n", 1)[0]
-    assert "--adr-0004-controlled-trial" in gated
-    # Every prerequisite before the trial is a hard stop (BLOCKED), and nothing uses sudo.
-    before = text.split('if [ "$RUN_TRIAL" = 1 ]; then', 1)[0]
-    assert before.count("|| blocked") >= 5
-    assert "sudo" not in text.replace("No sudo", "")
+    head, rest = text.split('case "$MODE" in', 1)
+    gated = rest.split("\nesac\n", 1)[0]
+    invocations = [ln for ln in text.splitlines() if "run_stage02.py" in ln
+                   and ("trial --backend" in ln or "reboot-" in ln)]
+    assert len(invocations) == 3  # trial, reboot-prepare, reboot-resume
+    assert all(ln in gated for ln in invocations)  # each only inside the explicit-mode block
+    assert gated.count("--adr-0004-controlled-trial") == 3
+    assert "*)" in gated and "Nothing run" in gated  # no mode flag: nothing is run
+    # Every prerequisite before the mode block is a hard stop (BLOCKED).
+    assert head.count("|| blocked") >= 5
+    # The script never reboots, powers off, or escalates privileges.
+    command_word = re.compile(r"(^|[;&|(]\s*)(sudo|systemctl|reboot|poweroff|shutdown|halt)(\s|$)")
+    for line in text.splitlines():
+        if not line.lstrip().startswith("#"):
+            assert not command_word.search(line.strip()), line

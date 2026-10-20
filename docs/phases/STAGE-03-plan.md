@@ -111,7 +111,7 @@ The `--i-accept-single-user-coordinator` flag maps to `CoordinatorPolicy.experim
 
 ## Security conditions carried forward
 
-- **ADR 0004 is Stage 02-only.** Stage 03 needs **ADR 0005** before any DMTCP coordinator runs through `src/napguard`. ADR 0005 would carry ADR 0004's conditions into the adapter's `CoordinatorPolicy`:
+- **ADR 0004 is Stage 02-only.** Stage 03 needs **ADR 0006** before any DMTCP coordinator runs through `src/napguard`. ADR 0006 would carry ADR 0004's conditions into the adapter's `CoordinatorPolicy`:
   - DMTCP 4.2.0;
   - single process;
   - no workload sockets;
@@ -155,6 +155,6 @@ Ubuntu validation would add `scripts/stage03-ubuntu-check.sh <SHA>`, modelled on
 ## Open decisions before implementation
 
 1. Approve Stage 02 completion, or explicitly accept the open items (section U).
-2. **ADR 0005**: the DMTCP coordinator policy for Stage 03 developer use.
-3. **The backend-decision ADR (OD-01)**: DMTCP primary, CRIU deferred.
+2. **ADR 0006**: the DMTCP coordinator policy for Stage 03 developer use.
+3. **The backend-decision ADR (OD-01)**: drafted as [ADR 0005](../decisions/0005-checkpoint-backend-selection.md) (Proposed). DMTCP is primary and provisional; CRIU is deferred.
 4. Placement of the shared process and network-audit utilities (`napguard.core`, proposed).
