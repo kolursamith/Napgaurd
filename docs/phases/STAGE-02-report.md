@@ -3,12 +3,13 @@
 - Date: 2026-10-19
 - Baseline: Stage 01 PASS (user-reported) at `39714383fcd9b683f367e7476882bfb7102adaa3` on `stage-01/requirements-design`
 - Branch: `stage-02/checkpoint-feasibility`, created from the approved Stage 01 commit. The commit SHA is recorded in Git history and the Ubuntu logs.
-- Verdict: **BLOCKED pending a security decision (OD-13 or OD-14). The DMTCP loopback isolation probe passed on Ubuntu (section O). ADR 0004 (proposed) awaits approval before any checkpoint trial.** Preparation is complete, but neither backend can run a trial under the current safety rules:
-  - The harness refuses to start a DMTCP coordinator, because no supported option keeps it off the network (section I-1a).
-  - CRIU needs privileges as an ordinary user (I-2).
-  - No checkpoint has run on Ubuntu yet.
+- Verdict: **IN PROGRESS — same-boot checkpoint/restore VERIFIED PASS on Ubuntu (DMTCP 4.2.0, `c-single`, section T); stage NOT complete.**
+  - Cross-reboot restoration: NOT TESTED.
+  - Other workload classes: NOT VERIFIED.
+  - Production coordinator security: NOT APPROVED (ADR 0004 is Stage 02-only).
+  - Remaining mandatory criteria: section U.
 
-Stage 02 PASS needs Ubuntu ARM64 evidence that a backend checkpoints and restores a real running process with its execution state preserved, in the same boot and across a VM reboot. Nothing in this report is that evidence. No checkpoint experiment was run on macOS.
+Stage 02 PASS needs Ubuntu ARM64 evidence that a backend checkpoints and restores a real running process with its execution state preserved, in the same boot and across a VM reboot. Section T records the first same-boot evidence (user-reported); cross-reboot evidence does not exist yet. No checkpoint experiment was run on macOS.
 
 Labels used below:
 
@@ -301,8 +302,8 @@ Status on Ubuntu 24.04 aarch64 (UTM): every execution cell is **NOT RUN**.
 | Threads / child processes | documented | documented |
 | Python | documented | documented |
 | TCP / GUI | not tested in Stage 02 (SKIP) | not tested in Stage 02 (SKIP) |
-| Same-boot restore on VM | **NOT RUN** | **NOT RUN** |
-| Cross-reboot restore on VM | **NOT RUN** | **NOT RUN** |
+| Same-boot restore on VM | **PASS for `c-single` only** (section T); other classes not run | **NOT RUN** (privileges, OD-14) |
+| Cross-reboot restore on VM | **NOT TESTED** | **NOT RUN** |
 
 ## I. Security and privilege findings
 
@@ -403,13 +404,13 @@ If none of these work, Stage 02 is BLOCKED and the target environment must be re
 | Design audit with traceability | section A | DONE (review) |
 | Research separating facts, claims, hypotheses | sections B and C | DONE (review) |
 | Harness, workload, and unit tests | `experiments/stage02/`, `tests/unit/test_stage02_*.py`, section F | DONE (Mac) |
-| A backend installs on Ubuntu 24.04 aarch64 | build logs | NOT RUN |
-| Genuine checkpoint and restore with preserved in-memory state (same boot) | `trial` `result.json` PASS | NOT RUN |
-| Cross-reboot restore | `reboot-resume` `result.json` PASS | NOT RUN |
+| A backend installs on Ubuntu 24.04 aarch64 | `build-dmtcp.sh` (DMTCP 4.2.0, pinned source), user-reported | PASS (DMTCP) |
+| Genuine checkpoint and restore with preserved in-memory state (same boot) | run `20261020T093355Z-dmtcp-c-single-7bce`, `TRIAL_EXIT=0` (section T) | **PASS (DMTCP, c-single only)** |
+| Cross-reboot restore | `reboot-resume` `result.json` PASS | **NOT TESTED** (needs an ADR 0004 amendment; section U) |
 
 | No DMTCP coordinator exposed on the network | harness refusal + `test_stage02_safety.py` | ENFORCED (refuses to start) |
 
-**Stage 02: BLOCKED pending OD-13 (DMTCP coordinator exposure: hand-off mechanism implemented, not yet verified on Ubuntu) or OD-14 (CRIU privileges).** The preparation is complete and reviewed. The only steps that can run now are `env`, the builds, and the CRIU-as-user trial, which is expected to report BLOCKED. STOP: Stage 03 has not been started.
+**Stage 02: IN PROGRESS.** Same-boot DMTCP `c-single` checkpoint/restore is VERIFIED PASS (section T). The mandatory criteria still open are listed in section U, and the stage is not complete. Stage 03 implementation has not started; its plan is in [STAGE-03-plan.md](STAGE-03-plan.md).
 
 ## N. DMTCP coordinator isolation investigation (OD-13)
 
@@ -618,3 +619,86 @@ The harness treated exit 0 as completion. It found no image about 35 ms later, r
 ### Next Ubuntu step
 
 Rerun the procedure in section R at the new commit. Nothing here claims that checkpoint or restore works.
+
+## T. First genuine checkpoint/restore: VERIFIED PASS (same boot, DMTCP, c-single)
+
+These are user-reported results from 2026-10-20. Claude has not reviewed the raw evidence files.
+
+| Item | Observed on Ubuntu |
+|---|---|
+| Commit | `f0f6599976f5a7fdeefd8f51413821c5d2606516` |
+| System | Ubuntu 24.04.5 ARM64, kernel `7.0.0-38-generic`, persistent ext4 |
+| Backend | DMTCP 4.2.0 (pinned source build) |
+| Stage 00 baseline | PASS |
+| Linux security tests | 58 passed |
+| Coordinator isolation (`dmtcp-isolation-check`) | PASS |
+| Controlled trial | `trial --backend dmtcp --class c-single --adr-0004-controlled-trial`: **PASS**, `TRIAL_EXIT=0` |
+| Native checkpoint image | 25,059,040 bytes |
+| Checkpoint completion (verified wait, section S) | 1.21 s |
+| Original process | terminated successfully |
+| Nonce | `d87aa0152528587f4388e57a305040a7`, preserved across restore |
+| Counter at original termination | 450 |
+| First counter after restore | 40 (rolled back into the checkpoint window, not 0, below 450) |
+| Counter after observing the restored process | 340 (advancing) |
+| Network | no new non-loopback listeners |
+| Processes | no leftover experiment processes |
+| Evidence directory (VM) | `~/.local/share/napguard-stage02/runs/20261020T093355Z-dmtcp-c-single-7bce` |
+
+**Interpretation.**
+
+- **The numbers fit the trial design.** The checkpoint was taken shortly after launch (about 40 ticks of 10 ms). The workload then ran on for about 4 s, which gives 450 at termination.
+- **The restored process continued from checkpointed memory.** It reported the original nonce and resumed at 40, inside the checkpoint window, rather than at 0 or at 450. It then advanced by about 300 ticks during the 3 s observation.
+- **Memory content was preserved.** The verifier also requires valid digests and the intact 4 MiB nonce-derived ballast. The trial verdict PASS implies those checks passed.
+- **This is the first real evidence that DMTCP 4.2.0 checkpoints and restores a running unmodified process with its in-memory state on Ubuntu 24.04 ARM64.** It covers **same boot, one class (`c-single`), one trial.**
+
+| Scope | Status |
+|---|---|
+| Same-boot checkpoint/restore, DMTCP, `c-single` | **VERIFIED PASS** (1 trial) |
+| Cross-reboot restoration | **NOT TESTED** |
+| Other workload classes (`c-threads`, `py`, `c-file-static`, `c-child`, `c-file-grow`, `tcp`, `gui`) | **NOT VERIFIED** |
+| CRIU | **NOT RUN** (privileges, OD-14) |
+| Production coordinator security | **NOT APPROVED.** Loopback only, no local authentication; ADR 0004 is Stage 02-only. |
+| ADR 0004 status | still **Proposed** in the repository. If the trial ran under your approval, record its acceptance explicitly. |
+
+## U. Stage 02 completion assessment
+
+| Approved criterion | Source | Status |
+|---|---|---|
+| Real checkpoint → terminate → restore, with proven state continuity | roadmap Stage 02 gate | **MET** (same boot, `c-single`) |
+| Cross-reboot restore verified before full acceptance | Stage 02 brief and blueprint stage plan | **OPEN** |
+| CMP-001: matrix over 7 representative classes | requirements | **OPEN:** 1/7 run. `tcp` and `gui` are deliberately blocked (I-1c, EXC-001), so the matrix needs recorded "blocked by design" entries for them. |
+| LIM-003: TCP behaviour measured | requirements | **OPEN, blocked by security:** a TCP workload triggers DMTCP's wildcard restore listener. Proposal: record "not measured, blocked by I-1c" as an accepted Stage 02 limitation (needs your decision). |
+| LIM-007: file changed after checkpoint | requirements | **OPEN** (`c-file-static`, `c-file-grow` not run) |
+| PRF-001 to PRF-003: durations and sizes recorded per trial | requirements | **PARTIAL:** recorded for one trial (1.21 s, 25 MB). Restore duration is in `result.json`, not yet reported. |
+| PLT-009: engine self-check recorded | requirements | **PARTIAL:** DMTCP has no self-check command. The version and the isolation check are recorded. Proposal: accept `dmtcp_launch --version` plus `dmtcp-isolation-check` as the DMTCP self-check. |
+| Backend decision (ADR, OD-01) | blueprint deliverable | **OPEN.** Not yet written. DMTCP is the evidence-backed choice; CRIU is untested. |
+| ADR 0004 acceptance recorded | ADR 0004 | **OPEN** (status Proposed) |
+
+**Smallest set to close Stage 02:** a cross-reboot `c-single` trial; a backend-decision ADR; the matrix filled at least for `c-threads`, `py`, and `c-file-static`, with `c-child`, `c-file-grow`, `tcp`, and `gui` recorded as blocked or limited; and your decisions on LIM-003 and PLT-009.
+
+### Cross-reboot verification proposal (not enabled; needs security review and approval)
+
+Smallest safe change, an **ADR 0004 amendment**:
+
+1. **Allow the flag on the two-phase reboot test.** `--adr-0004-controlled-trial` would also be accepted on `reboot-prepare` and `reboot-resume`, for `dmtcp` + `c-single` only. Every ADR 0004 condition applies to both phases. Today the flag is rejected there by design.
+2. **`reboot-prepare`** (pre-reboot boot) does the following:
+   - runs the existing launch, the precheck (one process, no sockets), and the verified checkpoint wait;
+   - terminates the original and confirms the image is on ext4;
+   - writes the manifest (artifact SHA-256s, workload binary hash, boot ID, DMTCP version, ADR flag) and `sync`s.
+
+   Every coordinator is stopped before reboot, so nothing listens across the reboot.
+3. **Manual step.** You run `sudo systemctl poweroff`, then start the VM from UTM. Nothing reboots automatically.
+4. **`reboot-resume`** must do the following:
+   - require that the boot ID changed, the artifact and binary hashes are unchanged, and DMTCP is still 4.2.0;
+   - **take a fresh listener baseline.** The current `reboot_resume` path does not, so the network guard would refuse to run: fail-closed, but it must be fixed;
+   - run a fresh isolation check in the new boot;
+   - restore through a new loopback hand-off coordinator, with the same audits, continuity rules (pre-reboot nonce, counter in `[ckpt_lower, kill)`), and leak scan.
+5. **Code needed** (estimate: about 30 lines plus tests):
+   - extend `controlled_trial_refusal()` to accept the two reboot entry points;
+   - store and restore the flag in the manifest;
+   - add the baseline to `reboot_resume`;
+   - add the CLI flag to both subcommands.
+
+   No other gate changes.
+
+Risk: none beyond ADR 0004, plus a DMTCP restore after reboot depending on absolute paths (binary, report file) that live on persistent ext4 under the run directory.
