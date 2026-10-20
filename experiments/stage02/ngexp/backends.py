@@ -87,14 +87,14 @@ def coordinator_log_notes(coord: Tracked) -> list[str]:
     return [line.strip() for line in lines if any(k in line for k in keys)][-20:]
 
 
-# ADR 0004 (proposed): the only class that may run under the controlled-trial exception.
+# ADR 0004 (accepted, limited): c-single, same boot and (Amendment 1) cross-reboot.
 CONTROLLED_TRIAL_CLASSES = ("c-single",)
 
-# ADR 0004 Amendment 2 (PROPOSED, NOT APPROVED): further single-process, socket-free classes,
-# same-boot `trial` only. Disabled until the project owner approves the amendment; flipping
-# this flag is the only code change needed, and tests pin it to False until then.
+# ADR 0004 Amendment 2: APPROVED by the project owner on 2026-10-20 for exactly one
+# same-boot `trial` per class on the single-user Ubuntu 24.04 ARM64 UTM VM. Not production.
+# Same-boot `trial` only: never `matrix`, never reboot-prepare/reboot-resume.
 AMENDMENT_2_CLASSES = ("c-threads", "py", "c-file-static", "c-file-grow")
-AMENDMENT_2_APPROVED = False
+AMENDMENT_2_APPROVED = True
 # Never runnable under ADR 0004, whatever is approved: multi-process, sockets (I-1c), GUI.
 NEVER_UNDER_ADR_0004 = ("c-child", "tcp", "gui")
 

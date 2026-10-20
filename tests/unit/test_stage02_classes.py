@@ -40,18 +40,28 @@ def snap(size: int, sha: str) -> dict[str, object]:
 
 
 @pytest.mark.parametrize("cls", AMENDMENT_2)
-def test_amendment_2_classes_are_still_refused(tmp_path: Path, cls: str) -> None:
-    assert cls not in backends.CONTROLLED_TRIAL_CLASSES
+def test_amendment_2_classes_are_allowed_for_same_boot_trial_only(tmp_path: Path,
+                                                                 cls: str) -> None:
+    assert cls not in backends.CONTROLLED_TRIAL_CLASSES  # not part of the base exception
     opts = trial.Options(backend="dmtcp", workload_class=cls, run_root=tmp_path,
                          dmtcp_controlled_trial=True)
-    for entry in ("trial", "reboot-prepare", "reboot-resume"):
+    assert trial.controlled_trial_refusal(opts, "trial") is None  # Amendment 2 (approved)
+    expected = {"reboot-prepare": "not allowed under ADR 0004 for `reboot-prepare`",
+                "reboot-resume": "not allowed under ADR 0004 for `reboot-resume`",
+                "matrix": "not `matrix`"}
+    for entry, fragment in expected.items():  # cross-reboot and matrix stay prohibited
         refusal = trial.controlled_trial_refusal(opts, entry)
-        assert refusal is not None and "not allowed under ADR 0004" in refusal
+        assert refusal is not None
+        assert fragment in refusal
+    other = trial.Options(backend="criu", workload_class=cls, run_root=tmp_path,
+                          dmtcp_controlled_trial=True)
+    assert trial.controlled_trial_refusal(other, "trial") is not None  # DMTCP only
 
 
-def test_only_c_single_is_authorised() -> None:
+def test_base_exception_and_global_gate_unchanged() -> None:
     assert backends.CONTROLLED_TRIAL_CLASSES == ("c-single",)
     assert backends.DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED is False
+    assert backends.FD_HANDOFF_ANALYSED_VERSION == "4.2.0"
 
 
 # ---------------------------------------------------------------- held-file verifier
@@ -193,13 +203,16 @@ def test_c_child_would_be_refused_by_the_single_process_precheck(tmp_path: Path)
 # ------------------------------------------------- Amendment 2 gate (disabled by default)
 
 
-def test_amendment_2_flag_is_pinned_off() -> None:
-    assert backends.AMENDMENT_2_APPROVED is False
+def test_amendment_2_is_approved_for_exactly_four_classes() -> None:
+    assert backends.AMENDMENT_2_APPROVED is True  # owner approval, 2026-10-20
     assert backends.AMENDMENT_2_CLASSES == AMENDMENT_2
     assert set(backends.NEVER_UNDER_ADR_0004) == {"c-child", "tcp", "gui"}
+    assert not set(backends.AMENDMENT_2_CLASSES) & set(backends.NEVER_UNDER_ADR_0004)
 
 
-def test_amendment_2_refusal_names_the_pending_amendment(tmp_path: Path) -> None:
+def test_without_approval_the_refusal_names_the_pending_amendment(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(backends, "AMENDMENT_2_APPROVED", False)  # the flag is the only switch
     opts = trial.Options(backend="dmtcp", workload_class="py", run_root=tmp_path,
                          dmtcp_controlled_trial=True)
     refusal = trial.controlled_trial_refusal(opts, "trial")

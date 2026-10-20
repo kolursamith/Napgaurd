@@ -779,8 +779,8 @@ States: VERIFIED PASS, VERIFIED FAIL, BLOCKED (with documented reason), NOT TEST
 | PRF-002 | image size recorded | **VERIFIED PASS** (2 observations) | 25,059,040 B (same boot, from `summarize`) and 25,050,848 B (cross-reboot, from the preparation log). See section Y. |
 | PRF-003 | restore duration recorded | **VERIFIED PASS (upper bound)** (2 observations) | 1.217 s (same boot) and 1.218 s (cross-reboot), both from `summarize`. Correct definition: the time from the restore command starting until the harness had seen **at least 3** restored reports per role, adopted them, and audited listeners. That is an **upper bound** on restore-to-first-report, not the first-report time itself. Precise first-report latency is recorded from now on. See section Y. |
 | CMP-001 `c-single` | compatibility matrix | **VERIFIED PASS** | sections T, W |
-| CMP-001 `c-threads`, `py`, `c-file-static` | compatibility matrix | **NOT TESTED** | not authorised by ADR 0004; harness and checks ready (Amendment 2, proposed) |
-| CMP-001 `c-file-grow` | compatibility matrix | **NOT TESTED** | as above; it doubles as the LIM-007 probe |
+| CMP-001 `c-threads`, `py`, `c-file-static` | compatibility matrix | **NOT TESTED** | authorised by ADR 0004 Amendment 2 (approved 2026-10-20); awaiting the Ubuntu run |
+| CMP-001 `c-file-grow` | compatibility matrix | **NOT TESTED** | Amendment 2 approved; awaiting the Ubuntu run; it doubles as the LIM-007 probe |
 | CMP-001 `c-child` | compatibility matrix | **BLOCKED** | multi-process; the single-process precheck refuses it, and multi-process restore and cleanup need a separate review |
 | CMP-001 `tcp` | compatibility matrix | **BLOCKED** | DMTCP 4.2.0 opens an `INADDR_ANY` restore listener for workload sockets (I-1c) |
 | CMP-001 `gui` | compatibility matrix | **BLOCKED** | X11/Wayland sockets (I-1c) and out of scope (EXC-001); not implemented |
@@ -843,7 +843,7 @@ States: VERIFIED PASS, VERIFIED FAIL, BLOCKED (with documented reason), NOT TEST
 
 Runs from before this commit stored the upper bound under the name `restore_to_first_report_s`. `summarize` now reports those values as `restore_upper_bound_s` with `restore_timing = legacy upper bound`.
 
-## Z. Compatibility trial preparation (ADR 0004 Amendment 2): prepared, DISABLED
+## Z. Compatibility trial preparation (ADR 0004 Amendment 2): APPROVED 2026-10-20, NOT YET RUN
 
 - **The gate** is `backends.AMENDMENT_2_CLASSES = (c-threads, py, c-file-static, c-file-grow)`, guarded by `AMENDMENT_2_APPROVED = False` and read at call time from that single source. When approved, those classes are allowed for **same-boot `trial` only**: never `matrix`, never `reboot-*`. `NEVER_UNDER_ADR_0004 = (c-child, tcp, gui)` is refused regardless of approval.
 - **The Ubuntu script** takes `--class` with a strict allowlist (`c-single | c-threads | py | c-file-static | c-file-grow`). Anything else is a usage error (exit 2), including `c-child`, `tcp`, `gui`, a wrong case, and shell metacharacters. Reboot modes accept `c-single` only. A harness refusal (exit 2) is reported as **BLOCKED**, so until approval a run like `--run-trial --class py` reports BLOCKED without checkpointing anything.
@@ -864,4 +864,4 @@ Runs from before this commit stored the upper bound under the name `restore_to_f
   - a `restore_and_verify` integration test for `c-file-static` with a fake backend: file consistency PASS, a changed file FAIL, and network exposure aborting before any continuity claim;
   - per-phase result preservation.
 
-**Status:** no additional class has been run. **Approval of ADR 0004 Amendment 2 is required**; then `AMENDMENT_2_APPROVED = True` and the pinned tests are updated in a reviewed commit.
+**Status:** the project owner **approved** ADR 0004 Amendment 2 on 2026-10-20 (one same-boot trial per class). `AMENDMENT_2_APPROVED = True` and the pinned tests were updated in the commit after `22175d3a`. **No Amendment 2 class has been run yet; none is claimed to pass.** The base exception (`c-single`), the global gate (`False`), the DMTCP 4.2.0 pin, and the prohibitions on `c-child`, `tcp`, `gui`, and cross-reboot runs of these classes are unchanged. The Ubuntu script's security-test step now runs all Stage 02 test modules (safety, launch config, classes, reboot, ckptwait), with zero skips allowed.
