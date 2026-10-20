@@ -9,6 +9,8 @@ The backend adapter is the only component that talks to a real checkpoint engine
 
 ## Interface (design sketch; implemented in Stage 03)
 
+Stage 03a implements this interface **synchronously**, with an explicit monotonic `deadline` on every call ([ADR 0007](../decisions/0007-synchronous-backend-calls-in-stage-03a.md), proposed). The async signatures below remain the Stage 06 integration target.
+
 ```python
 class CheckpointBackend(Protocol):
     name: str  # "dmtcp" | "criu"
