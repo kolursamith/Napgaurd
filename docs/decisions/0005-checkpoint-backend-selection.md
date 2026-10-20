@@ -1,6 +1,6 @@
 # ADR 0005: Checkpoint Backend Selection (Provisional)
 
-- Status: **Proposed (draft for review).** It closes open decision OD-01 provisionally.
+- Status: **Proposed; acceptance requested with the Stage 02 closure decision.** It closes open decision OD-01 provisionally. Updated 2026-10-20 with the full Stage 02 evidence.
 - Date: 2026-10-20
 - Related: [Stage 02 report](../phases/STAGE-02-report.md) (sections B, C, I, N, S, T, U), [ADR 0004](0004-stage02-dmtcp-loopback-coordinator-exception.md), [backend contract](../architecture/checkpoint-backend.md)
 - Requirements: CMP-001, CMP-002, SEC-002, SEC-010, PLT-001, PLT-009, LIM-003
@@ -10,6 +10,12 @@
 Stage 02 had to establish whether any backend can genuinely checkpoint and restore an unmodified process on the target, Ubuntu 24.04 aarch64 in UTM.
 
 - **DMTCP 4.2.0** was built from pinned source as an ordinary user. In one controlled trial it checkpointed and restored the `c-single` workload **in the same boot**. The restored process showed the original nonce and resumed from the checkpoint window (counter 40, after termination at 450), then advanced. Evidence: Stage 02 report section T (user-reported). The same class was then **restored across a full VM power cycle**. The boot ID changed, the artifacts were SHA-256-intact, the original nonce was preserved, and the counter went from 430 to 40 and then advanced. Evidence: section W.
+- **More classes (ADR 0004 Amendments 2 and 3, user-reported; Stage 02 report section AB):**
+  - `c-threads`: PASS (four roles).
+  - `c-file-static`: PASS (held file byte-identical).
+  - `c-file-grow`: PASS for process state. Writes after restore were appended after the pre-termination data (LIM-007).
+  - `py`: **verified failure**. 2 of 2 restores failed; the diagnostic retest crashed with SIGSEGV and wrote zero restored reports. The root cause is unknown.
+  - `c-child`, `tcp`, `gui`: blocked by policy.
 - **CRIU 4.2.1** was not run. As an ordinary user under Ubuntu's Yama `ptrace_scope=1`, it needs `CAP_CHECKPOINT_RESTORE` and `CAP_SYS_PTRACE` on its binary, or root. Either option is root-equivalent and conflicts with SEC-010 (OD-14).
 
 ## Decision (proposed)
@@ -18,8 +24,8 @@ Stage 02 had to establish whether any backend can genuinely checkpoint and resto
 
 The selection is **provisional and scoped**:
 
-- It is verified for `c-single`: one same-boot trial and one cross-reboot trial.
-- Other workload classes are not verified (Stage 02 report section X).
+- It is verified for the NapGuard reference workloads `c-single` (same boot and cross-reboot), `c-threads`, `c-file-static`, and `c-file-grow` (same boot), on Ubuntu 24.04 aarch64 (Stage 02 report section AB).
+- It is **not** verified for Python: the `py` class is a verified failure on DMTCP 4.2.0 aarch64. Multi-process, socket-holding, and GUI workloads are blocked. Arbitrary applications are not claimed (EXC-001).
 - Support claims follow CMP-002: only for (DMTCP 4.2.0, aarch64, a verified class).
 
 ## DMTCP is not production-safe
@@ -45,4 +51,8 @@ These findings stand and must be resolved, or explicitly accepted by a later ADR
 
 - **Stage 03** (backend integration) builds the DMTCP adapter behind the backend-neutral contract, with ADR 0004's conditions carried into a default-refusing `CoordinatorPolicy`. It needs its own ADR for developer use, because ADR 0004 is Stage 02-only.
 - CRIU stays probe-only until OD-14 is decided.
-- This ADR is revisited when cross-reboot evidence exists, when more classes are verified, or if DMTCP fails any of them.
+- **Revisited 2026-10-20** (all three triggers occurred): cross-reboot evidence exists (`c-single`), three more classes are verified, and DMTCP failed `py`. The decision is unchanged.
+  - The `py` failure narrows the supported scope. It does not invalidate DMTCP for native single-process workloads.
+  - It becomes a CMP-006 compatibility rule in Stage 03 (ADR 0006).
+- **Acceptance requested:** the owner accepts this ADR as part of the Stage 02 closure decision (Stage 02 report section AB.5).
+- This ADR is revisited again if DMTCP is upgraded, if the `py` root cause is found, or if CRIU's privilege question (OD-14) is decided.

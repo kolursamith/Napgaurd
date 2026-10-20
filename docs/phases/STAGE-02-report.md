@@ -3,10 +3,12 @@
 - Date: 2026-10-19
 - Baseline: Stage 01 PASS (user-reported) at `39714383fcd9b683f367e7476882bfb7102adaa3` on `stage-01/requirements-design`
 - Branch: `stage-02/checkpoint-feasibility`, created from the approved Stage 01 commit. The commit SHA is recorded in Git history and the Ubuntu logs.
-- Verdict: **FEASIBILITY DEMONSTRATED; Stage 02 NOT formally complete.** DMTCP 4.2.0 `c-single` checkpoint/restore is **VERIFIED PASS on Ubuntu ARM64, both same-boot (section T) and cross-reboot (section W)**.
-  - Other workload classes: NOT VERIFIED.
+- Verdict: **READY FOR OWNER CLOSURE DECISION (section AB); Stage 02 NOT formally closed until the owner approves.** DMTCP 4.2.0 on Ubuntu ARM64:
+  - **VERIFIED PASS:** `c-single` (same boot and cross-reboot), `c-threads`, `c-file-static`, and `c-file-grow`. `c-file-grow` carries the LIM-007 observation.
+  - **VERIFIED FAIL:** `py` (2 of 2 restores; SIGSEGV; root cause unknown).
+  - **BLOCKED BY POLICY:** `c-child`, `tcp`, `gui`.
   - Production coordinator security: NOT APPROVED (ADR 0004 is Stage 02-only).
-  - Evidence matrix and closure table: section X.
+  - Current evidence matrix and closure table: [section AB](#ab-final-stage-02-evidence-compatibility-matrix-and-closure-readiness). Earlier status (sections H, U, X) is kept as history.
 
 Stage 02 PASS needs Ubuntu ARM64 evidence that a backend checkpoints and restores a real running process with its execution state preserved, in the same boot and across a VM reboot. Section T records the same-boot evidence and section W the cross-reboot evidence (both user-reported). No checkpoint experiment was run on macOS.
 
@@ -905,3 +907,113 @@ This section supersedes the `c-threads` and `py` rows of the section X matrix. T
 **Unchanged:** `DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED = False`, `CONTROLLED_TRIAL_CLASSES = ("c-single",)`, the fd-821 loopback-only hand-off, the DMTCP 4.2.0 pin, the Python workload, and the success path for `c-single` and `c-threads` (only diagnostic facts were added).
 
 **Status:** approved, **not yet run**. No `py` restore is claimed to work.
+
+## AB. Final Stage 02 evidence, compatibility matrix, and closure readiness
+
+Status: **all owner-authorized Stage 02 trials have been executed.** This section supersedes sections H, U, and X as the **current** status. Those sections, and the original `py` FAIL in section AA, are kept unchanged as history. Every result below is **user-reported** from Ubuntu 24.04.5 LTS aarch64 (UTM) with DMTCP 4.2.0 built from the pinned source. Claude did not see the raw logs.
+
+### AB.1 Trial results
+
+| Class | Commit | Run | Verdict | Evidence (user-reported) |
+|---|---|---|---|---|
+| `c-single`, same boot | `f0f65999` | `20261020T093355Z-dmtcp-c-single-7bce` | **VERIFIED PASS** | section T: 450 → 40 → 340 |
+| `c-single`, cross-reboot | `55905be4` | `20261020T100428Z-reboot-dmtcp-c-single-ed7a` | **VERIFIED PASS** | section W: boot ID changed, artifacts SHA-256-intact, 430 → 40 → 340 |
+| `c-threads`, same boot | `52e5baed` | not transcribed | **VERIFIED PASS** | state continuity verified for all four roles (`main`, `t0`–`t2`) |
+| `py`, same boot, trial 1 (Amendment 2) | `52e5baed` | not transcribed | **VERIFIED FAIL** | checkpoint verified (43,099,292 B, 1.19 s), original terminated, then `dmtcp_restart exited within 1 s` (section AA) |
+| `py`, same boot, trial 2 (Amendment 3 diagnostic retest) | `9394f850` | not transcribed | **VERIFIED FAIL** | the restarter was killed by **SIGSEGV** (signal 11, `CLD_DUMPED`, `core_dumped=True`) with **zero** restored reports |
+| `c-file-static`, same boot | `9394f850` | `20261020T113343Z-dmtcp-c-file-static-f49a` | **VERIFIED PASS** | 20,856,544 B; checkpoint 1.22 s; 450 → 30 → 350; held file byte-identical at checkpoint, termination, and after restore; trial exit 0 |
+| `c-file-grow`, same boot | `9394f850` | `20261020T113521Z-dmtcp-c-file-grow-b71f` | **VERIFIED PASS** (process state) + LIM-007 observation | 20,856,544 B; checkpoint 1.24 s; 460 → 30 → 340; trial exit 0; 146 Linux security tests passed; no new non-loopback listener, no leftover experiment process |
+
+Counters are shown as termination → first restored → last observed.
+
+**`c-file-grow` (LIM-007 observation).** The process state was restored correctly. After restore, the workload's writes were **appended after the pre-termination data**. So the file holds the original's post-checkpoint lines, followed by lines the restored process wrote from its rolled-back counter.
+
+- The process and its external file are therefore **inconsistent**: the file shows progress that the restored process never made.
+- This is an **external-state consistency limitation** (LIM-007, LIM-002), not a restore failure.
+- DMTCP 4.2.0 did not report an error for the changed file.
+
+**`py` (verified compatibility failure).** Both trials failed at restore, after a verified checkpoint.
+
+- The diagnostic retest shows the process **crashed with SIGSEGV** (signal 11, with a core dump).
+- Zero restored reports were written, so the crash happened before the restored interpreter resumed its computation loop.
+- `dmtcp_restart` execs `mtcp_restart` in place, so the crash is inside DMTCP's restore of the Python image, or immediately after it.
+- **The root cause remains unknown.** Candidates are unconfirmed:
+  - memory-layout conflicts during `mtcp_restart` on aarch64 (B4/B5);
+  - a library or vDSO mapping issue specific to the interpreter.
+- **The `setsid()` JWARNING is incidental.** It occurs in the passing C classes too (section AA).
+- **Conclusion for the matrix:** the `py` class is a **verified failure** for (DMTCP 4.2.0, Ubuntu 24.04 aarch64). This is evidence about **this** interpreter workload on **this** backend and platform only. It is not a statement about other Python versions, other architectures, or other backends.
+
+### AB.2 Compatibility matrix (CMP-001), current
+
+Backend: **DMTCP 4.2.0**, user-level, on Ubuntu 24.04.5 aarch64. CRIU 4.2.1 was **not tried**: it is BLOCKED by privileges (OD-14, SEC-010).
+
+| # | CMP-001 class | Harness class | State | Notes |
+|---|---|---|---|---|
+| 1 | single-threaded C | `c-single` | **VERIFIED SUCCESS** (same boot and cross-reboot) | sections T, W |
+| 2 | multi-threaded C | `c-threads` | **VERIFIED SUCCESS** (same boot) | four roles; not tried cross-reboot (ADR 0004 Amendment 2) |
+| 3 | Python computation | `py` | **VERIFIED COMPATIBILITY FAILURE** | 2 of 2 restores failed; trial 2 SIGSEGV; root cause unknown |
+| 4a | regular file, unchanged | `c-file-static` | **VERIFIED SUCCESS** (same boot) | held file byte-identical |
+| 4b | regular file, growing | `c-file-grow` | **VERIFIED SUCCESS** (process state) + **INFORMATIONAL FILESYSTEM LIMITATION** | appends after pre-termination data (LIM-007) |
+| 5 | parent with child | `c-child` | **BLOCKED BY POLICY** | multi-process restore and cleanup are not reviewed; refused by the single-process precheck |
+| 6 | TCP connection | `tcp` | **BLOCKED BY POLICY** | a socket-holding image makes DMTCP 4.2.0 open an `INADDR_ANY` restore listener (I-1c); LIM-003 |
+| 7 | GUI application | `gui` | **BLOCKED BY POLICY / NOT TESTED** | display-server sockets (I-1c); out of scope (EXC-001); not implemented |
+
+**Support statements allowed by this evidence (CMP-002):**
+
+- Only the NapGuard reference workloads in classes 1, 2, 4a, and 4b are verified, for (DMTCP 4.2.0, Ubuntu 24.04 aarch64).
+- **No claim** is made for general Python programs, GUI applications, TCP or other socket-holding programs, multi-process programs, or arbitrary Linux processes (EXC-001).
+- Cross-reboot restore is verified for class 1 only.
+
+### AB.3 Measurements (individual observations, not benchmark averages)
+
+These are in addition to section Y.
+
+| Run | Class | Checkpoint completion (PRF-001) | Image (PRF-002) | Counters | Source |
+|---|---|---|---|---|---|
+| `py` trial 1 (`52e5baed`) | `py` | 1.19 s | 43,099,292 B | — (restore failed) | user report |
+| `20261020T113343Z-dmtcp-c-file-static-f49a` | `c-file-static` | 1.22 s | 20,856,544 B | 450 → 30 → 350 | user report |
+| `20261020T113521Z-dmtcp-c-file-grow-b71f` | `c-file-grow` | 1.24 s | 20,856,544 B | 460 → 30 → 340 | user report |
+
+PRF-003 (restore timing):
+
+- For the c-single trials it is recorded in section Y as an upper bound (1.217 s and 1.218 s).
+- From commit `22175d3a`, each run's `result.json` also stores the precise `restore_to_first_report_s`.
+- For the Amendment 2 runs those values **have not been transcribed** here, and none are estimated.
+
+### AB.4 Stage 02 exit-criteria review
+
+Gate table: criterion, evidence, result, and remaining risk (AGENTS.md rule 12).
+
+| Mandatory criterion | Evidence | Result | Remaining risk or required decision |
+|---|---|---|---|
+| Real checkpoint → terminate → restore with proven state continuity (roadmap gate) | sections T, AB.1 (4 classes) | **PASS** | none |
+| Cross-reboot restore before full acceptance | section W | **PASS** (`c-single`) | other classes were not tried across a reboot |
+| A backend installs on Ubuntu 24.04 aarch64 | `build-dmtcp.sh`, pinned source | **PASS** (DMTCP) | ARM64 is not CI-tested upstream (K-5) |
+| CMP-001: 7 classes, each with outcome, commands, versions, evidence | AB.2 | **PASS with recorded exceptions**: 4 verified successes, 1 verified failure, 3 blocked by policy | **owner accepts** `c-child`, `tcp`, and `gui` as BLOCKED, and CRIU as not tried (OD-14) |
+| CMP-002: no support claim without evidence | AB.2 support statements | **PASS** | review in later stages |
+| CMP-006: Stage 02 negative findings become compatibility rules | findings: `py` failure, socket listener (I-1c), multi-process | **Stage 03 deliverable** (traceability stage 03) | ADR 0006 lists the rules |
+| LIM-003: TCP behaviour reported | I-1c | **BLOCKED: recorded limitation** | **owner accepts** |
+| LIM-007: changed-file behaviour observed | `c-file-grow` | **PASS (observed)**: restore succeeded, writes appended after pre-termination data, no backend error | NapGuard must warn (Stage 09) |
+| PLT-009: engine self-check recorded | version pin + `dmtcp-isolation-check` (sections O, T, W) | **PASS (substitute)** | **owner accepts** the substitute; it does not check kernel features |
+| PRF-001, PRF-002 | sections Y, AB.3 | **PASS** (5 observations each) | single observations, not averages |
+| PRF-003 | section Y | **PASS (upper bound)** | precise values for later runs not transcribed (optional, read-only `summarize`) |
+| Backend decision (OD-01) | [ADR 0005](../decisions/0005-checkpoint-backend-selection.md), updated with this evidence | **Proposed** | **owner accepts** ADR 0005 |
+| No coordinator exposed on the network | every trial: listener diff and reachability probes clean | **PASS** (Stage 02 conditions) | the coordinator is unauthenticated for local users (SEC-002): **not production-approved** |
+| ADR 0004 security restrictions respected | trials ran only through `ubuntu-controlled-trial.sh` with every gate; production gate `False` throughout | **PASS** | ADR 0004 expires when Stage 02 closes |
+
+### AB.5 Closure readiness verdict
+
+**READY FOR AN OWNER CLOSURE DECISION.** No further Ubuntu experiment is required. Every mandatory criterion is either PASS or is a recorded limitation that only needs owner acceptance.
+
+**Proposed formal Stage 02 closure decision** (for owner approval):
+
+> Stage 02 (checkpoint feasibility) is **CLOSED (PASS with recorded limitations)** on Ubuntu 24.04.5 aarch64 with DMTCP 4.2.0. The owner:
+>
+> 1. accepts ADR 0005 (DMTCP 4.2.0 as the provisional primary backend; CRIU deferred under OD-14);
+> 2. accepts the PLT-009 substitute (version pin plus isolation check);
+> 3. accepts `c-child`, `tcp`, and `gui` as BLOCKED BY POLICY, LIM-003 as a recorded limitation, and CRIU as not tried;
+> 4. accepts `py` as a VERIFIED COMPATIBILITY FAILURE with unknown root cause; no further `py` retest under Stage 02;
+> 5. accepts the `c-file-grow` result as the LIM-007 observation;
+> 6. records that ADR 0004 and its amendments expire at closure, and that no coordinator runs through `src/napguard` until ADR 0006 is approved.
+
+**Smallest optional action, not blocking:** run the read-only `python3 -I experiments/stage02/run_stage02.py summarize` on Ubuntu, so the run IDs for `c-threads` and both `py` trials, and the precise PRF-003 values, can be transcribed. It runs no experiment.

@@ -3,8 +3,11 @@
 - Status: **Plan only. Implementation has not started.**
 - Date: 2026-10-20
 - Entry gate:
-  - **Not yet satisfied.** Stage 02 feasibility is demonstrated: DMTCP `c-single` is VERIFIED PASS both same-boot and cross-reboot. But Stage 02 is not formally closed; see the owner decisions in [Stage 02 report section X](STAGE-02-report.md#x-evidence-matrix-closure-table-and-approvals).
-  - Implementation starts only after Stage 02 is closed, ADR 0005 is accepted, ADR 0006 is approved, and this plan is approved.
+  - **Not yet satisfied.** Every Stage 02 trial has been executed, and Stage 02 is ready for the owner's closure decision ([Stage 02 report section AB](STAGE-02-report.md#ab-final-stage-02-evidence-compatibility-matrix-and-closure-readiness)):
+    - VERIFIED PASS: `c-single` (same boot and cross-reboot), `c-threads`, `c-file-static`, `c-file-grow`;
+    - VERIFIED FAIL: `py`;
+    - BLOCKED: `c-child`, `tcp`, `gui`.
+  - Implementation starts only after Stage 02 is closed, ADR 0005 is accepted, [ADR 0006](../decisions/0006-stage03-dmtcp-backend-integration-and-coordinator-security.md) (drafted, Proposed) is approved, and this plan is approved.
 - Roadmap definition ([traceability](../requirements/traceability.md#approved-stage-roadmap)): **Stage 03 = backend integration: checkpoint API, adapter, capability detection, CLI.** Gate: *real operations work through NapGuard's API.*
 - **Out of scope:**
 
@@ -23,7 +26,7 @@
 Each step is a separate, reviewable commit on a new branch `stage-03/backend-integration` created from the approved Stage 02 commit. Each step comes with unit tests.
 
 1. **Backend Protocol and data types** (`checkpoint/base.py`): the Stage 01 contract (`probe`, `assess`, `launch`, `status`, `checkpoint`, `restore`, `cancel`, `cleanup`) as a `typing.Protocol`; frozen dataclasses; `ErrorCode` (StrEnum) and `BackendError`. No Linux calls.
-2. **Capability detection** (`checkpoint/dmtcp.py: probe`, `checkpoint/criu.py: probe`): find the tools, record absolute paths, the version (`dmtcp_launch --version` only), and tool SHA-256s. `verified=True` only for (4.2.0, aarch64, `c-single`). CRIU is probe-only.
+2. **Capability detection** (`checkpoint/dmtcp.py: probe`, `checkpoint/criu.py: probe`): find the tools, record absolute paths, the version (`dmtcp_launch --version` only), and tool SHA-256s. `verified=True` only for (4.2.0, aarch64) and the Stage 02-verified reference classes (`c-single`, `c-threads`, `c-file-static`, `c-file-grow`; ADR 0006 §3). CRIU is probe-only.
 3. **DMTCP adapter with deny-by-default coordinator policy** (`checkpoint/policy.py`, `checkpoint/dmtcp.py`, `core/proc.py`, `core/netaudit.py`):
    - `CoordinatorPolicy()` refuses by default;
    - `CoordinatorPolicy.experimental_single_user(...)` is required to start the fail-closed loopback hand-off coordinator;
@@ -97,7 +100,7 @@ Behaviour verified in Stage 02:
 
 - The tools are found under the configured prefix or `PATH`, and absolute paths are recorded.
 - The version comes from `dmtcp_launch --version`, which exits before any coordinator code runs.
-- The self-check is the version check plus an on-demand isolation check. `verified` is true only for (DMTCP 4.2.0, aarch64, `c-single` class), backed by the Stage 02 evidence. Everything else is `CANDIDATE` or `UNKNOWN` (CMP-002, CMP-003).
+- The self-check is the version check plus an on-demand isolation check. `verified` is true only for (DMTCP 4.2.0, aarch64) and the Stage 02-verified reference classes (ADR 0006 §3). Everything else is `CANDIDATE` or `UNKNOWN` (CMP-002, CMP-003).
 - If DMTCP is missing, the result is `BACKEND_UNAVAILABLE` with build guidance (`build-dmtcp.sh`). NapGuard never installs it.
 
 ### Checkpoint and restore API (used by later stages)
@@ -171,7 +174,7 @@ Ubuntu validation would add `scripts/stage03-ubuntu-check.sh <SHA>`, modelled on
 
 ## Open decisions before implementation
 
-1. Approve Stage 02 completion, or explicitly accept the open items (section U).
-2. **ADR 0006**: the DMTCP coordinator policy for Stage 03 developer use.
+1. Approve the Stage 02 closure decision ([section AB.5](STAGE-02-report.md#ab5-closure-readiness-verdict)).
+2. **ADR 0006**: the DMTCP coordinator policy for Stage 03 developer use. Drafted as [ADR 0006](../decisions/0006-stage03-dmtcp-backend-integration-and-coordinator-security.md). It includes the CMP-006 rules from Stage 02 (`KNOWN_RESTORE_FAILURE` for Python, `SOCKETS_HELD`, `MULTI_PROCESS`, `DEVICE_STATE`).
 3. **The backend-decision ADR (OD-01)**: drafted as [ADR 0005](../decisions/0005-checkpoint-backend-selection.md) (Proposed). DMTCP is primary and provisional; CRIU is deferred.
 4. Placement of the shared process and network-audit utilities (`napguard.core`, proposed).

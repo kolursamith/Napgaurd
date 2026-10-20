@@ -1,6 +1,6 @@
 # ADR 0004: Stage 02-Only DMTCP Coordinator Exception via a Pre-Bound Loopback Listener
 
-- Status: **Accepted (limited)** for the same-boot `c-single` diagnostic, which was executed on 2026-10-20 at commit `f0f6599976f5a7fdeefd8f51413821c5d2606516` with the user's approval. **Amendment 1 (cross-reboot `c-single`) is Accepted (limited)**: approved by the user and executed once on 2026-10-20 at commit `55905be43fcf67ad1effd2dd5d17e5d1b6c57867`, VERIFIED PASS (Stage 02 report section W). **Amendment 2 (four more classes, same boot) is Approved (limited)** by the project owner on 2026-10-20: exactly one same-boot trial each for `c-threads`, `py`, `c-file-static`, and `c-file-grow`, on the single-user Ubuntu 24.04 ARM64 UTM VM only. Executed so far at `52e5baed59af16b34ccd6ed47cf4037d32e70f07`: `c-threads` PASS (user-reported) and `py` **FAIL** (restore). **Amendment 3 (one `py` diagnostic retest, same boot) is Approved (limited)** by the project owner on 2026-10-20 as a separate, one-time approval. Not yet executed.
+- Status: **Accepted (limited)** for the same-boot `c-single` diagnostic, which was executed on 2026-10-20 at commit `f0f6599976f5a7fdeefd8f51413821c5d2606516` with the user's approval. **Amendment 1 (cross-reboot `c-single`) is Accepted (limited)**: approved by the user and executed once on 2026-10-20 at commit `55905be43fcf67ad1effd2dd5d17e5d1b6c57867`, VERIFIED PASS (Stage 02 report section W). **Amendment 2 (four more classes, same boot) is Approved (limited)** by the project owner on 2026-10-20: exactly one same-boot trial each for `c-threads`, `py`, `c-file-static`, and `c-file-grow`, on the single-user Ubuntu 24.04 ARM64 UTM VM only. **Executed in full** (user-reported): `c-threads` PASS and `py` **FAIL** at `52e5baed59af16b34ccd6ed47cf4037d32e70f07`; `c-file-static` PASS and `c-file-grow` PASS (with the LIM-007 observation) at `9394f850e4c0d1fa1b32715b6b658f0b6526a851`. **Amendment 3 (one `py` diagnostic retest, same boot)** was approved by the project owner on 2026-10-20 as a separate, one-time approval and **executed once** at `9394f850…`: **FAIL** (SIGSEGV). No approval for any further trial remains.
 - Amended: 2026-10-20 (scope split; Amendment 1; Amendment 2; Amendment 3)
 - Date: 2026-10-19
 - Scope: **Stage 02 feasibility experiments only.** It does not apply to NapGuard production (Stages 03–12).
@@ -13,8 +13,8 @@
 |---|---|---|
 | **Approved** | executed once; **VERIFIED PASS** (Stage 02 report section T) | `trial --backend dmtcp --class c-single --adr-0004-controlled-trial`: a same-boot checkpoint/restore diagnostic under every condition below |
 | **Approved (Amendment 1)** | executed once; **VERIFIED PASS** (Stage 02 report section W) | `reboot-prepare` and `reboot-resume` with `--backend dmtcp --class c-single --adr-0004-controlled-trial`, with the extra conditions in "Amendment 1" |
-| **Approved (Amendment 2)** | approved by the project owner on 2026-10-20; `c-threads` PASS (user-reported), `py` **FAIL** (restore), `c-file-static` and `c-file-grow` not yet executed | exactly one same-boot `trial` each for `c-threads`, `py`, `c-file-static`, `c-file-grow` (see "Amendment 2"); `AMENDMENT_2_APPROVED = True` |
-| **Approved (Amendment 3)** | approved by the project owner on 2026-10-20 as a one-time decision; **not yet executed** | exactly **one** additional same-boot `trial --class py` diagnostic retest; enforced by `backends.ONE_TIME_RETESTS = {"py": 1}` (see "Amendment 3") |
+| **Approved (Amendment 2)** | approved by the project owner on 2026-10-20; **executed**: `c-threads` PASS, `py` **FAIL** (restore), `c-file-static` PASS, `c-file-grow` PASS + LIM-007 observation (Stage 02 report section AB) | exactly one same-boot `trial` each for `c-threads`, `py`, `c-file-static`, `c-file-grow` (see "Amendment 2"); `AMENDMENT_2_APPROVED = True` |
+| **Approved (Amendment 3)** | approved by the project owner on 2026-10-20 as a one-time decision; **executed once: FAIL** (SIGSEGV, `CLD_DUMPED`, zero restored reports) | exactly **one** additional same-boot `trial --class py` diagnostic retest; enforced by `backends.ONE_TIME_RETESTS = {"py": 1}` (see "Amendment 3") |
 | **Prohibited** | refused by the harness or by this ADR | production use (any NapGuard daemon, CLI, or GUI outside `experiments/stage02`); TCP or any socket-holding workload; multi-user hosts or use by anyone other than the single VM user; `c-child`, `tcp`, and `gui`; **cross-reboot runs of the Amendment 2 classes**; more than one trial per Amendment 2 class without a new approval (for `py`: more than the one Amendment 3 retest); `matrix`; CRIU under this exception; any DMTCP version other than 4.2.0 |
 
 ## Context
@@ -159,7 +159,7 @@ These are in addition to conditions 1–11 above, which apply to both phases.
 
 ## Expiry and review triggers
 
-This ADR expires when Stage 02 ends. It must be reviewed immediately if any of these happens:
+This ADR expires when Stage 02 ends. **Expiry includes every amendment.** After Stage 02 closure, the harness gates remain in the repository as evidence, but the owner's authorization to run further trials under them ends. Stage 03 developer use of a DMTCP coordinator is governed only by [ADR 0006](0006-stage03-dmtcp-backend-integration-and-coordinator-security.md), once approved. **Nothing in this ADR authorizes production use.** It must be reviewed immediately if any of these happens:
 
 - DMTCP is upgraded;
 - an audit reports exposure;
