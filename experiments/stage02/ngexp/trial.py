@@ -272,7 +272,8 @@ def launch_and_checkpoint(state: TrialState, opts: Options, wc: WorkloadClass,
     lower = max_counters(before)
     request_line = model.count_lines(report)
     state.rec.event("mark_ckpt_request", lower=lower, line=request_line)
-    ckpt_check, artifacts = backend.checkpoint(session)
+    ckpt_check, artifacts = backend.checkpoint(session,
+                                               audit=lambda step: guard_network(state, step))
     state.add(ckpt_check)
     guard_network(state, "checkpoint")
     if ckpt_check.status is not Status.PASS:

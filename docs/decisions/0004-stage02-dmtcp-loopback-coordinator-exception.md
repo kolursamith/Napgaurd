@@ -47,8 +47,9 @@ Allow **exactly one controlled experiment shape** to start a DMTCP coordinator, 
 6. **Reachability probes** cover every non-loopback IPv4 address and every global-scope IPv6 address of the VM. IPv6 link-local addresses are not probed.
 7. **Leak scan:** after cleanup, any live process of the user whose command line or memory mappings reference the run directory makes the trial FAIL. It is reported, not killed.
 8. **Version check at the probe:** in controlled mode, `probe()` is BLOCKED unless DMTCP reports 4.2.0.
-9. **No other change:** no sudo, capabilities, sysctl, AppArmor, or firewall change. No TCP, multi-process, GUI, or reboot experiment.
-10. **Procedure:** `experiments/stage02/ubuntu-controlled-trial.sh <SHA>` runs every prerequisite and stops with BLOCKED at the first failure. It runs the trial only when `--run-trial` is given explicitly.
+9. **Verified completion:** a checkpoint counts only after the bounded completion wait (Stage 02 report section S): a restart script naming this run's port and image, a stable final image, no temporary file, and peers RUNNING. A command's exit status is never evidence, because `--bcheckpoint` does not block in DMTCP 4.2.0.
+10. **No other change:** no sudo, capabilities, sysctl, AppArmor, or firewall change. No TCP, multi-process, GUI, or reboot experiment.
+11. **Procedure:** `experiments/stage02/ubuntu-controlled-trial.sh <SHA>` runs every prerequisite and stops with BLOCKED at the first failure. It runs the trial only when `--run-trial` is given explicitly.
 
 ## Consequences
 

@@ -150,6 +150,8 @@ class Tracked:
     ident: ProcId
     popen: subprocess.Popen[bytes] | None = None
     own_group: bool = False  # True when the harness created this process's session
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
 
 
 class Recorder:
@@ -268,7 +270,9 @@ class Recorder:
                 os.close(fd_map[1])  # the child keeps its copy; the source fd stays open
         ident = _identity_soon(proc.pid)
         self.sessions.add(proc.pid)
-        tracked = Tracked(name, ident, proc, own_group=True)
+        tracked = Tracked(name, ident, proc, own_group=True,
+                          stdout_path=out_path if capture else None,
+                          stderr_path=err_path if capture else None)
         self.tracked.append(tracked)
         self._append(
             "commands.jsonl",

@@ -15,11 +15,12 @@ import signal
 import socket
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .ckptwait import parse_dmtcp_status, wait_for_checkpoint
 from .results import Check, Status
 from .runner import (
     ArtifactSet,
@@ -73,6 +74,18 @@ FD_HANDOFF_ANALYSED_VERSION = "4.2.0"
 # PROTECTED_FD_START = 820 and upward (include/protectedfds.h lists ~25 entries). Sockets in
 # this range belong to DMTCP, not to the workload. Anything below it is a workload socket.
 DMTCP_PROTECTED_FDS = range(820, 860)
+
+CHECKPOINT_TIMEOUT_S = 180.0  # bounded wait for a verified-complete checkpoint
+
+
+def coordinator_log_notes(coord: Tracked) -> list[str]:
+    """Checkpoint-related lines from the coordinator's own log (diagnostic evidence)."""
+    if coord.stderr_path is None or not coord.stderr_path.exists():
+        return []
+    keys = ("Checkpoint complete", "checkpoint", "unhandled user command", "error", "Error")
+    lines = coord.stderr_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return [line.strip() for line in lines if any(k in line for k in keys)][-20:]
+
 
 # ADR 0004 (proposed): the only class that may run under the controlled-trial exception.
 CONTROLLED_TRIAL_CLASSES = ("c-single",)
@@ -315,26 +328,71 @@ class Dmtcp:
         )
         return Session(wl, [coord], {"port": port})
 
-    def checkpoint(self, session: Session) -> tuple[Check, ArtifactSet]:
+    def checkpoint(self, session: Session,
+                   audit: Callable[[str], None] = lambda step: None) -> tuple[Check, ArtifactSet]:
+        """Request a checkpoint, then wait for verified completion (never trust exit 0).
+
+        `--bcheckpoint` does not block in DMTCP 4.2.0 (see ngexp/ckptwait.py), so the plain
+        `--checkpoint` request is followed by a bounded wait for protocol and artifact
+        evidence, with liveness checks and listener audits on every poll.
+        """
         assert self.tools is not None
         port = int(session.data["port"])
+        coord = session.helpers[0]
+        # Stage 02 DMTCP trials are single-process (ADR 0004: c-single), hence one image.
+        expected = 1
         self.rec.run("dmtcp-list-before", dmtcp_command_argv(self.tools, port, "--list"), timeout=15)
-        res = self.rec.run("dmtcp-checkpoint", dmtcp_command_argv(self.tools, port, "--bcheckpoint"),
-                           timeout=180)
-        artifacts = collect_artifacts(self.ckpt_dir, self.rec.run_dir,
-                                      ["ckpt_*.dmtcp", "dmtcp_restart_script*.sh"])
-        images = [a for a in artifacts.items if a.path.endswith(".dmtcp") and a.size > 0]
-        facts = {"duration_s": round(res.duration_s, 3), "image_bytes": artifacts.total_bytes,
-                 "images": [a.path for a in images]}
+        since_ns = time.time_ns() - 1_000_000_000  # 1 s slack for filesystem timestamps
+        started = time.monotonic()
+        res = self.rec.run("dmtcp-checkpoint", dmtcp_command_argv(self.tools, port, "--checkpoint"),
+                           timeout=30)
+        facts: dict[str, Any] = {"request": res.summary(), "expected_images": expected}
         if not res.ok:
-            return Check("native checkpoint created", Status.FAIL, res.summary(), facts=facts), artifacts
-        if not images:
+            return (Check("native checkpoint created", Status.FAIL,
+                          f"checkpoint request failed: {res.summary()}", facts=facts),
+                    collect_artifacts(self.ckpt_dir, self.rec.run_dir, ["*"]))
+
+        def liveness() -> str | None:
+            if not alive(session.workload.ident):
+                return "workload died while the checkpoint was in progress"
+            if coord.popen is not None and leader_exited_unreaped(coord.popen):
+                return "coordinator exited while the checkpoint was in progress"
+            return None
+
+        waited = wait_for_checkpoint(self.ckpt_dir, port, since_ns, expected,
+                                     timeout=CHECKPOINT_TIMEOUT_S, liveness=liveness,
+                                     audit=lambda: audit("checkpoint (waiting)"))
+        status = self.rec.run("dmtcp-status-after", dmtcp_command_argv(self.tools, port,
+                                                                        "--status"), timeout=15)
+        status_fields = parse_dmtcp_status(status.stdout())
+        coord_log = coordinator_log_notes(coord)
+        artifacts = collect_artifacts(self.ckpt_dir, self.rec.run_dir,
+                                      ["ckpt_*.dmtcp", "dmtcp_restart_script*.sh", "*.temp"])
+        facts.update({
+            "duration_s": round(time.monotonic() - started, 3),
+            "wait_polls": waited.polls,
+            "wait_reason": waited.reason,
+            "images": [img.__dict__ for img in waited.evidence.images],
+            "restart_scripts": waited.evidence.scripts,
+            "temp_files": waited.evidence.temp_files,
+            "stale_files": waited.evidence.stale,
+            "status_after": status_fields,
+            "coordinator_log": coord_log,
+            "checkpoint_dir_listing": sorted(p.name for p in self.ckpt_dir.iterdir())
+            if self.ckpt_dir.is_dir() else [],
+        })
+        if not waited.ok:
             return Check("native checkpoint created", Status.FAIL,
-                         "dmtcp_command reported success but no ckpt_*.dmtcp image exists",
-                         facts=facts), artifacts
+                         f"checkpoint not verified complete: {waited.reason}", facts=facts), artifacts
+        if status_fields.get("NUM_PEERS") != str(expected) or status_fields.get("RUNNING") != "yes":
+            return Check("native checkpoint created", Status.FAIL,
+                         f"coordinator status after checkpoint is {status_fields} (expected "
+                         f"NUM_PEERS={expected}, RUNNING=yes)", facts=facts), artifacts
+        total = sum(img.size for img in waited.evidence.images)
         return Check("native checkpoint created", Status.PASS,
-                     f"{len(images)} DMTCP image(s), {artifacts.total_bytes} bytes, "
-                     f"{res.duration_s:.2f}s", facts=facts), artifacts
+                     f"{len(waited.evidence.images)} DMTCP image(s), {total} bytes; restart script "
+                     f"{waited.evidence.scripts}; stable; workers RUNNING; "
+                     f"{facts['duration_s']:.2f}s", facts=facts), artifacts
 
     def stop_original(self, session: Session) -> bool:
         assert self.tools is not None
@@ -353,8 +411,12 @@ class Dmtcp:
         exited = restarter.popen is not None and leader_exited_unreaped(restarter.popen)
         session = Session(restarter, [coord], {"port": port})
         if exited:
-            return Check("restore command", Status.FAIL, "dmtcp_restart exited immediately"), session
-        return Check("restore command", Status.PASS, "dmtcp_restart running"), session
+            return (Check("restore command started", Status.FAIL,
+                          "dmtcp_restart exited within 1 s", facts={"log": coordinator_log_notes(
+                              restarter)}), session)
+        return (Check("restore command started", Status.PASS,
+                      "dmtcp_restart running; restoration NOT yet verified (see state continuity)"),
+                session)
 
     def restored_pid(self, kpid: int | None, pid: int) -> int | None:
         return kpid  # DMTCP virtualizes getpid(); only the kernel PID identifies the process
@@ -474,7 +536,8 @@ class Criu:
             self.rec.run("chown-images", ["sudo", "-n", "chown", "-R",
                                           f"{os.getuid()}:{os.getgid()}", str(path)], timeout=60)
 
-    def checkpoint(self, session: Session) -> tuple[Check, ArtifactSet]:
+    def checkpoint(self, session: Session,
+                   audit: Callable[[str], None] = lambda step: None) -> tuple[Check, ArtifactSet]:
         assert self.criu is not None
         self.images.mkdir(exist_ok=True, mode=0o700)
         log = self.rec.logs / "criu-dump.log"
@@ -512,15 +575,17 @@ class Criu:
                            timeout=180)
         self._own(log)
         if not res.ok:
-            return Check("restore command", Status.FAIL, f"{res.summary()} (see {log})"), None
+            return Check("restore command started", Status.FAIL, f"{res.summary()} (see {log})"), None
         text = read_text(str(pidfile), "")
         if not text.isdigit():
-            return Check("restore command", Status.FAIL, "criu restore wrote no pidfile"), None
+            return Check("restore command started", Status.FAIL, "criu restore wrote no pidfile"), None
         tracked = self.rec.adopt("criu-restored", int(text), not_before_ticks)
         if tracked is None:
-            return Check("restore command", Status.FAIL,
+            return Check("restore command started", Status.FAIL,
                          f"restored pid {text} not found or not owned by this user"), None
-        return Check("restore command", Status.PASS, f"criu restored root pid {text}"), Session(tracked)
+        return (Check("restore command started", Status.PASS,
+                      f"criu restore exited 0 with root pid {text}; restoration NOT yet verified "
+                      "(see state continuity)"), Session(tracked))
 
     def restored_pid(self, kpid: int | None, pid: int) -> int | None:
         return kpid if kpid is not None else pid  # CRIU does not virtualize PIDs

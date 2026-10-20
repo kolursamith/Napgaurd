@@ -571,3 +571,50 @@ Expected evidence:
 - `experiment processes cleaned up` PASS.
 
 Anything else is reported as FAIL or BLOCKED. A PASS here would be **same-boot only**; a cross-reboot DMTCP trial needs an ADR 0004 amendment.
+
+## S. First controlled DMTCP trial on Ubuntu: failure, root cause, fix
+
+### Observed (user-reported, commit a088cd93b73368cf1088219de866fc527adc70f9)
+
+`ubuntu-controlled-trial.sh … --run-trial` produced **TRIAL_EXIT=1**:
+
+| Time (coordinator log) | Event |
+|---|---|
+| 14:51:34.611 | workload connected |
+| 14:51:34.983 | checkpoint started; generation incremented; one peer |
+| 14:51:35.019 | coordinator received `quit` |
+
+- **Harness result:** `FAIL native checkpoint created — dmtcp_command reported success but no ckpt_*.dmtcp image exists`. The checkpoint directory was empty.
+- **Safety checks:** all isolation and cleanup checks passed, and no new non-loopback listener appeared.
+- **No checkpoint or restore evidence was produced.**
+
+### Root cause (verified in the pinned DMTCP 4.2.0 source)
+
+**`dmtcp_command --bcheckpoint` does not block in DMTCP 4.2.0.**
+
+1. `dmtcp_command` sends the blocking prefix as a separate one-character command `b`, then sends `c` (`dmtcp_command.cpp`, `case 'b':`).
+2. The coordinator builds `string cmd(1, hello_remote.coordCmd)`, so it sees the string `"b"`. But `handleUserCommand` sets `blockUntilDone` only for `"bc"`, so `"b"` is logged as an `unhandled user command` and answered with `ERROR_INVALID_COMMAND`. The `main` branch has the same check.
+3. `c` then starts the checkpoint and is answered **immediately**. `dmtcp_command` overwrites its status with that reply and exits 0.
+
+The harness treated exit 0 as completion. It found no image about 35 ms later, recorded FAIL, and stopped the original, which matches the `quit` at `.019`. **The harness bug was trusting exit 0.**
+
+### Fix (`ngexp/ckptwait.py`, `Dmtcp.checkpoint`)
+
+- **Plain request.** `--checkpoint` is sent, and its exit status counts only as "request accepted".
+- **Bounded completion wait** (180 s, polling every 0.25 s). Completion requires **all** of the following:
+  1. exactly one `ckpt_*.dmtcp` regular file (single process, ADR 0004), non-empty, newer than the request. DMTCP writes `<image>.temp` and renames it when done (`processinfo.h:114`, `ckptserializer.cpp:400-411`);
+  2. no `*.temp` or `*.tmp` file left;
+  3. a `dmtcp_restart_script_*.sh` newer than the request that names **this run's coordinator port and the image**. The coordinator writes it only after every worker has reported its image (`dmtcp_coordinator.cpp:575-595`);
+  4. image sizes and mtimes unchanged for at least 0.5 s;
+  5. afterwards, `dmtcp_command --status` reports `NUM_PEERS=1` and `RUNNING=yes`.
+- **Each poll** runs the listener audit (an exposure aborts the trial) and liveness checks: the workload's identity must still be alive and the coordinator must not have exited. Either death fails at once.
+- **On timeout or failure** the trial FAILs with diagnostics: the evidence reason, the directory listing, temporary and stale files, status fields, and the coordinator log lines containing "checkpoint", "Checkpoint complete", "unhandled user command", or errors. Normal cleanup then runs.
+- **Restore wording.** Restore is not claimed early: the check is now `restore command started … restoration NOT yet verified`. Success is decided only by `restored state continuity` (same nonce, counter rolled back into the window, digests, ballast, progress).
+- **Unchanged:** ADR 0004 restrictions (DMTCP 4.2.0, `c-single` only, loopback hand-off, no workload sockets); the global gate (`False`); listener audits.
+- **Regression tests** (`tests/unit/test_stage02_ckptwait.py`):
+  - Deterministic virtual-clock tests: a delayed checkpoint is **not** rejected early; a growing image must stabilise first; a missing image times out with diagnostics; a leftover `.temp` image, a missing restart script, a foreign port or image, two images, an empty image, and stale files all fail; workload death aborts at once; an audit failure propagates.
+  - Linux-only: `Dmtcp.checkpoint` with a fake `dmtcp_command` that returns at once and finishes 1.5 s later passes. A checkpoint that never lands fails at the timeout. A workload killed mid-wait fails fast.
+
+### Next Ubuntu step
+
+Rerun the procedure in section R at the new commit. Nothing here claims that checkpoint or restore works.
