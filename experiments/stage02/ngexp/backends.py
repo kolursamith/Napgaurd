@@ -27,6 +27,7 @@ from .runner import (
     Recorder,
     Tracked,
     alive,
+    child_exit_status,
     collect_artifacts,
     current_listeners,
     leader_exited_unreaped,
@@ -85,6 +86,31 @@ def coordinator_log_notes(coord: Tracked) -> list[str]:
     keys = ("Checkpoint complete", "checkpoint", "unhandled user command", "error", "Error")
     lines = coord.stderr_path.read_text(encoding="utf-8", errors="replace").splitlines()
     return [line.strip() for line in lines if any(k in line for k in keys)][-20:]
+
+
+def log_tail(path: Path | None, lines: int = 60) -> list[str]:
+    """The last `lines` lines of a captured log, UNFILTERED (diagnostic evidence).
+
+    Keyword filtering (coordinator_log_notes) can hide the fatal line and surface an
+    incidental one, e.g. a JASSERT_ERRNO warning matches "error" via "strerror".
+    """
+    if path is None or not path.exists():
+        return []
+    return [line.rstrip() for line in
+            path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]]
+
+
+def restart_failure_facts(restarter: Tracked, coord: Tracked) -> dict[str, object]:
+    """Read-only evidence for a dmtcp_restart that exited early. Reaps nothing."""
+    return {
+        "log": coordinator_log_notes(restarter),
+        "restarter_exit": (child_exit_status(restarter.popen)
+                           if restarter.popen is not None else None),
+        "restarter_stderr_tail": log_tail(restarter.stderr_path),
+        "restarter_stdout_tail": log_tail(restarter.stdout_path, 20),
+        "restarter_stderr_path": str(restarter.stderr_path) if restarter.stderr_path else None,
+        "restore_coordinator_tail": log_tail(coord.stderr_path, 30),
+    }
 
 
 # ADR 0004 (accepted, limited): c-single, same boot and (Amendment 1) cross-reboot.
@@ -420,8 +446,8 @@ class Dmtcp:
         session = Session(restarter, [coord], {"port": port})
         if exited:
             return (Check("restore command started", Status.FAIL,
-                          "dmtcp_restart exited within 1 s", facts={"log": coordinator_log_notes(
-                              restarter)}), session)
+                          "dmtcp_restart exited within 1 s",
+                          facts=restart_failure_facts(restarter, coord)), session)
         return (Check("restore command started", Status.PASS,
                       "dmtcp_restart running; restoration NOT yet verified (see state continuity)"),
                 session)

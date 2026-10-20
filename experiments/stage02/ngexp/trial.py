@@ -399,6 +399,11 @@ def restore_and_verify(state: TrialState, opts: Options, wc: WorkloadClass, back
     if session is not None:
         state.sessions.append(session)
     if restore_check.status is not Status.PASS:
+        # Diagnostic only: did the restored image run at all before the restarter exited?
+        late = model.read_reports(report, kill_line)
+        state.facts["reports_after_kill_at_restore_fail"] = {
+            "count": len(late), "first": asdict(late[0]) if late else None,
+            "last": asdict(late[-1]) if late else None}
         return
     if not wait_for_roles_guarded(state, report, wc.roles, kill_line, 3, timeout=30,
                                   step="restore (waiting)"):

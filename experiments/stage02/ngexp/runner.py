@@ -116,6 +116,34 @@ def leader_exited_unreaped(popen: subprocess.Popen[bytes]) -> bool:
     return info is not None
 
 
+_CLD_KINDS = {getattr(os, n): n for n in ("CLD_EXITED", "CLD_KILLED", "CLD_DUMPED") if hasattr(os, n)}
+
+
+def child_exit_status(popen: subprocess.Popen[bytes]) -> dict[str, object] | None:
+    """How our exited child ended (exit code or signal), WITHOUT reaping it (diagnostics).
+
+    None while the child is running or when it is not (or no longer) our child.
+    """
+    try:
+        info = os.waitid(os.P_PID, popen.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return None
+    if info is None:
+        return None
+    kind = _CLD_KINDS.get(info.si_code, str(info.si_code))
+    status: dict[str, object] = {"pid": info.si_pid, "how": kind}
+    if kind == "CLD_EXITED":
+        status["exit_code"] = info.si_status
+    else:
+        status["signal"] = info.si_status
+        try:
+            status["signal_name"] = signal.Signals(info.si_status).name
+        except ValueError:
+            pass
+        status["core_dumped"] = kind == "CLD_DUMPED"
+    return status
+
+
 @dataclass
 class CmdResult:
     name: str
