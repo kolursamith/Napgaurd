@@ -107,3 +107,37 @@ This was reproduced on the Mac with the same pattern.
 - with a fake daemon: `$!` is the daemon, a clean stop passes, a socket left behind fails, a non-zero exit fails, an ignored SIGTERM times out (and is not claimed stopped), and a process that is not ours is never signalled;
 - the script starts the daemon directly and stops it only through the helper;
 - the real daemon, in a subprocess, exits 0 on SIGTERM, removes its socket, and records its workload as STOPPED.
+
+## GUI restore failure: "VERIFY_FAILED: the reporting process is not this restore's process"
+
+**Observed** (owner-reported). A GUI restore of `ck-c502a9cb82b1` (workload `wl-c5e25adb0309`, generation 2, PUBLISHED) failed the ownership check. The automated Ubuntu runs passed.
+
+**Root cause.** A race between the reference workload's reporting and DMTCP's asynchronous checkpoint. It is not a foreign process.
+
+- `ngcounter.c` `report()` reads its kernel PID, then (for `c-single`) computes the digest of the 4 MiB ballast, composes the line, opens the file, and writes it.
+- DMTCP can suspend and checkpoint the process at any instruction. When that happens inside `report()`, the image holds a half-finished report that already contains the **original** process's PID.
+- After a restore, the first thing the restored process does is finish that write. Its first line therefore carries the dead original's PID, which no restore can adopt.
+- The window is a few milliseconds per ~100 ms report period, wider for `c-single` because of the ballast digest. So it struck occasionally: in a GUI session with several checkpoints, not in the single-checkpoint automated runs.
+- The labelled test double reproduces the exact error.
+
+**Fix** (`selftest/verify.py::ownership_problems`, used by the daemon restore and the Stage 03a self-test):
+
+- every restored report must come from a process this restore can adopt: this user, this restore's session, started after the restore began;
+- the only exception is the **first** restored line of each role, and only if it carries the original instance's PID and the original is confirmed dead (identity checked);
+- **still FAIL:** a second line with the original's PID, or one after an owned line; any other unadoptable PID; a missing PID; a role with no line from this restore's own process.
+
+The ownership problems are recorded in the error detail. The DMTCP adapter, the coordinator, and the audits are unchanged.
+
+**Regression tests:**
+
+- `tests/unit/test_mvp_restore_ownership.py`: the rule, including every failure case; the in-flight restore of generation 2; a stray foreign writer still refused; three checkpoints, then restore, stop, and restore the same checkpoint again, three times;
+- `test_a_report_in_flight_at_checkpoint_time_is_not_a_foreign_process` (self-test).
+
+**Confirming the cause on the VM** (read-only, from the existing evidence):
+
+```bash
+python3 -I -c "import sqlite3,os; db=sqlite3.connect(os.path.expanduser('~/.local/share/napguard/catalog.db')); [print(r) for r in db.execute(\"select origin,state,pid,kill_line,started_utc from instances where workload_id='wl-c5e25adb0309' order by started_utc\")]"
+grep -h adopt_refused ~/.local/share/napguard/workloads/wl-c5e25adb0309/session-restore-*/logs/events.jsonl
+```
+
+With this root cause, the refused PID is the LAUNCH instance's PID, refused as "not running", and the first report after the restore began carries that PID.

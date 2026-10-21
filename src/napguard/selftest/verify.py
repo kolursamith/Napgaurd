@@ -20,7 +20,7 @@ mistaken for the restored process.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -134,6 +134,42 @@ def verify_restore(*, role: str, original: Sequence[model.Observation], marks: M
                  f"same nonce, counter resumed at {first.counter} within the checkpoint window "
                  f"[{marks.ckpt_lower}, {marks.ckpt_upper}+], {marks.kill_counter - first.counter} "
                  f"ticks before termination, and advanced to {last.counter}", facts)
+
+
+def ownership_problems(restored: Sequence[model.Observation], *, original_kpids: set[int],
+                       adopt: Callable[[int], bool]) -> list[str]:
+    """Why the restored reports are NOT all from this restore's own process ([] if they are).
+
+    Every reporting kernel PID must be adoptable by this restore (this user, this restore's
+    session, started after the restore began). One exact exception per role: the workload
+    reads its kernel PID, then composes and writes a report, and DMTCP may checkpoint it
+    in between. The restored process then first writes that half-finished line, which
+    still carries the ORIGINAL process's PID. Such a line is accepted only if it is the
+    first restored line of its role, its PID is the original's, and the caller confirmed the
+    original dead (pass `original_kpids` only then). Every later line, and every other PID,
+    must be adoptable, and each role must report from this restore's own process.
+    """
+    problems: list[str] = []
+    owned_roles: set[str] = set()
+    inflight_roles: set[str] = set()
+    adoptable: dict[int, bool] = {}
+    for obs in sorted(restored, key=lambda o: o.line_no):
+        if obs.kpid is None:
+            problems.append(f"line {obs.line_no}: no kernel PID reported")
+            continue
+        if obs.kpid not in adoptable:
+            adoptable[obs.kpid] = adopt(obs.kpid)
+        if adoptable[obs.kpid]:
+            owned_roles.add(obs.role)
+        elif (obs.kpid in original_kpids and obs.role not in owned_roles
+              and obs.role not in inflight_roles):
+            inflight_roles.add(obs.role)  # the report in flight at checkpoint time
+        else:
+            problems.append(f"line {obs.line_no}: kernel PID {obs.kpid} ({obs.role}) is not this "
+                            "restore's process")
+    for role in sorted({o.role for o in restored} - owned_roles):
+        problems.append(f"role {role}: no report from this restore's own process")
+    return problems
 
 
 def first_report_latency_s(started_mono_ns: int,

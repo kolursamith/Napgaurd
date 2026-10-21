@@ -40,10 +40,10 @@ from napguard.checkpoint.base import (
 )
 from napguard.checkpoint.compatibility import Compatibility
 from napguard.checkpoint.manifest import MANIFEST_NAME, read_manifest, write_manifest
-from napguard.core.proc import boot_id, filtered_env
+from napguard.core.proc import ProcId, alive, boot_id, filtered_env
 from napguard.selftest import model
 from napguard.selftest.run import CLASSES, TICK_MS, SelftestBackend, build_reference
-from napguard.selftest.verify import Marks, Status, verify_restore
+from napguard.selftest.verify import Marks, Status, ownership_problems, verify_restore
 from napguard.storage.catalog import Catalog, new_id, utc_now
 
 
@@ -342,10 +342,15 @@ class Manager:
 
         if not self._wait_reports(report, roles, start_line, 3, session, "restore (waiting)"):
             raise fail("RESTORE_FAILED", "the restored workload did not report")
-        kpids = {o.kpid for o in model.read_reports(report, start_line)}
-        if None in kpids or not all(self.backend.adopt_restored(session, k)
-                                    for k in kpids if k is not None):
-            raise fail("VERIFY_FAILED", "the reporting process is not this restore's process")
+        original_dead = source["pid"] is not None and not alive(ProcId(
+            int(source["pid"]), int(source["start_ticks"]), int(source["uid"])))
+        problems = ownership_problems(
+            model.read_reports(report, start_line),
+            original_kpids={int(source["pid"])} if original_dead else set(),
+            adopt=lambda k: self.backend.adopt_restored(session, k))
+        if problems:
+            raise fail("VERIFY_FAILED", "the reporting process is not this restore's process: "
+                       + problems[0], ownership=problems[:20])
         end = time.monotonic() + self.verify_window_s
         while time.monotonic() < end:
             if self.backend.status(session).state is not SessionState.ALIVE:

@@ -38,7 +38,15 @@ from napguard.checkpoint.manifest import read_manifest, write_manifest
 from napguard.core.proc import filtered_env
 
 from . import model
-from .verify import Check, Marks, Status, first_report_latency_s, overall, verify_restore
+from .verify import (
+    Check,
+    Marks,
+    Status,
+    first_report_latency_s,
+    overall,
+    ownership_problems,
+    verify_restore,
+)
 
 TICK_MS = 10
 SOURCE = Path(__file__).with_name("ngcounter.c")
@@ -269,15 +277,17 @@ class _Run:
                      f"{self.opts.report_timeout_s:.0f} s of the restore")
             return
         early = model.read_reports(self.report, kill_line)
-        kpids = {o.kpid for o in early}
-        owned = None not in kpids and all(
-            self.backend.adopt_restored(restored_session, k) for k in kpids if k is not None)
+        kpids = sorted({o.kpid for o in early if o.kpid is not None})
+        problems = ownership_problems(
+            early, original_kpids={o.kpid for o in original if o.kpid is not None},
+            adopt=lambda k: self.backend.adopt_restored(restored_session, k))
         self.add("restored process owned by this restore",
-                 Status.PASS if owned else Status.FAIL,
-                 f"kernel pids {sorted(k for k in kpids if k is not None)} "
-                 + ("adopted (this user, this restore's session, started after the restore)"
-                    if owned else "NOT adoptable: not this restore's process"))
-        if not owned:
+                 Status.FAIL if problems else Status.PASS,
+                 f"kernel pids {kpids} "
+                 + ("NOT adoptable: not this restore's process: " + "; ".join(problems[:3])
+                    if problems else "adopted (this user, this restore's session, started after "
+                    "the restore); at most one in-flight report per role from the dead original"))
+        if problems:
             return
 
         end = time.monotonic() + self.opts.verify_window_s

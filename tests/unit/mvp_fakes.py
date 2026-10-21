@@ -37,8 +37,13 @@ from napguard.selftest import model
 
 class Counter(threading.Thread):
     def __init__(self, report: Path, roles: tuple[str, ...], nonce: str, counters: dict[str, int],
-                 kpid: int, die_after: float | None = None) -> None:
+                 kpid: int, die_after: float | None = None,
+                 inflight_kpid: int | None = None) -> None:
         super().__init__(daemon=True)
+        # Emulates a report composed BEFORE the checkpoint and written after the restore: the
+        # first restored line of each role carries the (dead) original's kernel PID.
+        self.inflight_kpid = inflight_kpid
+        self.inflight_done: set[str] = set()
         self.report, self.roles, self.nonce, self.kpid = report, roles, nonce, kpid
         self.counters = dict(counters)
         self.chains = {r: model.DigestChain(nonce, r) for r in roles}
@@ -56,7 +61,11 @@ class Counter(threading.Thread):
                     self.counters[role] += 1
                     c = self.counters[role]
                     if c % 10 == 0:
-                        out.append(f"NGSTATE v1 run=t role={role} pid=1 kpid={self.kpid} "
+                        kp = self.kpid
+                        if self.inflight_kpid is not None and role not in self.inflight_done:
+                            kp = self.inflight_kpid
+                            self.inflight_done.add(role)
+                        out.append(f"NGSTATE v1 run=t role={role} pid=1 kpid={kp} "
                                    f"nonce={self.nonce} counter={c} "
                                    f"digest={self.chains[role].at(c):016x} ballast=- "
                                    f"mono_ns={time.monotonic_ns()}\n")
@@ -75,7 +84,9 @@ class Counter(threading.Thread):
 
 
 class FakeBackend:
-    """Modes: genuine (default), fresh (restore starts a new process), dies, refuse-launch."""
+    """Modes: genuine (default), fresh (restore starts a new process), dies, refuse-launch,
+    inflight (first restored line per role carries the original's PID), stray-writer (a
+    second, foreign process with the same nonce also writes after the restore)."""
 
     def __init__(self, mode: str = "genuine") -> None:
         self.mode = mode
@@ -112,7 +123,8 @@ class FakeBackend:
         worker, ckpt = self.sessions[session.session_id]
         image = ckpt / "ckpt_fake.dmtcp"
         image.write_text(json.dumps({"nonce": worker.nonce, "counters": worker.snapshot(),
-                                     "roles": list(worker.roles)}), encoding="utf-8")
+                                     "roles": list(worker.roles), "kpid": worker.kpid}),
+                         encoding="utf-8")
         image.chmod(0o600)
         entries = artifacts.inspect_all(ckpt, [(image.name, ArtifactRole.IMAGE)])
         return CaptureResult(entries, {"expected_processes": 1, "filesystem": "ext4"}, 5, "")
@@ -136,8 +148,13 @@ class FakeBackend:
         counters = dict.fromkeys(roles, 0) if self.mode == "fresh" else state["counters"]
         self.kpid += 1
         worker = Counter(report, roles, nonce, counters, self.kpid,
-                         die_after=0.2 if self.mode == "dies" else None)
+                         die_after=0.2 if self.mode == "dies" else None,
+                         inflight_kpid=state["kpid"] if self.mode == "inflight" else None)
         worker.start()
+        if self.mode == "stray-writer":  # not this restore's process, same memory image
+            stray = Counter(report, roles, nonce, counters, 9999)
+            stray.start()
+            self.sessions[uuid.uuid4().hex] = (stray, options.session_dir)
         options.session_dir.mkdir(mode=0o700, parents=True)
         sid = uuid.uuid4().hex
         self.sessions[sid] = (worker, options.session_dir)

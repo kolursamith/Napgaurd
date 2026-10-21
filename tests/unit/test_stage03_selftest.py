@@ -41,8 +41,11 @@ ROLES = CLASSES["c-threads"].roles
 
 class FakeWorkload(threading.Thread):
     def __init__(self, report: Path, nonce: str, counters: dict[str, int], kpid: int,
-                 die_after: float | None = None, style: str = "normal") -> None:
+                 die_after: float | None = None, style: str = "normal",
+                 inflight_kpid: int | None = None) -> None:
         super().__init__(daemon=True)
+        self.inflight_kpid = inflight_kpid  # first restored line per role: original's PID
+        self.inflight_done: set[str] = set()
         self.style = style  # "normal", "split" (each line in two writes), or "corrupt"
         self.report, self.nonce, self.kpid = report, nonce, kpid
         self.counters = dict(counters)
@@ -61,8 +64,12 @@ class FakeWorkload(threading.Thread):
                     self.counters[role] += 1
                     c = self.counters[role]
                     if c % 10 == 0:
+                        kp = self.kpid
+                        if self.inflight_kpid is not None and role not in self.inflight_done:
+                            kp = self.inflight_kpid
+                            self.inflight_done.add(role)
                         lines.append(
-                            f"NGSTATE v1 run=managed role={role} pid=1 kpid={self.kpid} "
+                            f"NGSTATE v1 run=managed role={role} pid=1 kpid={kp} "
                             f"nonce={self.nonce} counter={c} digest={self.chains[role].at(c):016x} "
                             f"ballast=- mono_ns={time.monotonic_ns()}\n")
             if lines and self.style == "corrupt":
@@ -163,7 +170,8 @@ class FakeBackend:
         else:
             wl = FakeWorkload(self.report, self.nonce, self.snapshot, 2002,
                               die_after=0.15 if self.mode == "dies" else None,
-                              style="split" if self.mode == "split-writes" else "normal")
+                              style="split" if self.mode == "split-writes" else "normal",
+                              inflight_kpid=1001 if self.mode == "inflight" else None)
         self.workloads["restore"] = wl
         wl.start()
         return self._session("restore", 2002, options.session_dir)
@@ -347,3 +355,12 @@ def test_a_corrupt_finished_report_is_a_failure_with_cleanup(tmp_path: Path) -> 
     assert check.status is Status.FAIL and "missing" in check.detail
     assert statuses(result)["processes cleaned up"] is Status.PASS
     assert backend.cleaned == ["launch"] and backend.leak_scan(tmp_path) == []
+
+
+def test_a_report_in_flight_at_checkpoint_time_is_not_a_foreign_process(tmp_path: Path) -> None:
+    # Ubuntu GUI restore (VERIFY_FAILED): the first restored line of each role carried the
+    # dead original's PID, because DMTCP checkpointed between reading the PID and writing.
+    result, _ = selftest(tmp_path, "inflight")
+    assert result.status is Status.PASS, result.to_json()
+    owned = next(c for c in result.checks if c.name == "restored process owned by this restore")
+    assert owned.status is Status.PASS
