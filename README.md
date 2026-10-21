@@ -6,7 +6,11 @@ The project targets Ubuntu 24.04. Transparent checkpoint support will be compati
 
 ## Current status
 
-Only Layer 0 repository and development-tooling foundations are present. There is no checkpoint, daemon, power, sleep, recovery, or GUI implementation yet.
+- **Stage 02** (checkpoint feasibility): closed, PASS with recorded limitations.
+- **Stage 03a** (DMTCP backend integration, developer mode): verified on Ubuntu 24.04 ARM64.
+- **Stages 04–10 MVP** (catalog, supervisor, daemon/IPC, scheduler, battery, recovery, Tkinter GUI): implemented and Mac-tested, **awaiting Ubuntu verification**. See the [MVP report](docs/phases/MVP-report.md).
+
+Developer mode only, on a single-user Ubuntu VM; not production-authorized ([ADR 0006](docs/decisions/0006-stage03-dmtcp-backend-integration-and-coordinator-security.md), [ADR 0008](docs/decisions/0008-mvp-developer-demo-integration.md)).
 
 ## Host-side development setup
 
@@ -22,7 +26,7 @@ Linux-specific development and verification must run on an explicitly verified U
 
 ## Project layout
 
-- `src/napguard/`: application packages, currently empty foundations only.
+- `src/napguard/`: backend adapter (`checkpoint/`), process and network audits (`core/`), catalog (`storage/`), daemon, IPC, scheduler and manager (`daemon/`), battery (`power/`), GUI (`ui/`), self-test (`selftest/`).
 - `tests/`: unit, integration, and system test suites.
 - `packaging/systemd/`: future Linux service packaging.
 - `docs/architecture/`: component architecture.

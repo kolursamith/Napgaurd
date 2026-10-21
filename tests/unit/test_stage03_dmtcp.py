@@ -261,7 +261,11 @@ def test_security_gates_unchanged_and_coordinators_developer_only() -> None:
              for p in src.rglob("*.py")}
     assert not [p for p, t in texts.items() if "ngexp" in t.split('"""', 2)[-1]]
     permissive = [p for p, t in texts.items() if "experimental_single_user(" in t]
-    assert sorted(permissive) == ["checkpoint/policy.py", "cli.py"]
+    # cli.py: `napguard-dev selftest`; main.py: `napguard daemon` (ADR 0008, proposed). Both
+    # only behind the per-invocation acknowledgement flag.
+    assert sorted(permissive) == ["checkpoint/policy.py", "cli.py", "main.py"]
+    assert "experimental_single_user(True) if acknowledged" in texts["main.py"]
+    assert "if not args.i_accept_single_user_coordinator" in texts["cli.py"]
     assert dmtcp.DmtcpBackend(tools=None).policy == CoordinatorPolicy.deny()
 
 

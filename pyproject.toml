@@ -12,6 +12,7 @@ dependencies = []
 
 [project.scripts]
 napguard-dev = "napguard.cli:main"
+napguard = "napguard.main:main"
 
 [project.optional-dependencies]
 dev = [
