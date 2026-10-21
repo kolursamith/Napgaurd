@@ -73,3 +73,37 @@ PYTHONPATH=src python3 -m napguard.main gui
 - Stopping the daemon stops its workloads (FR-030 not met). No cold-boot auto-recovery (REL-007), no retention or quotas (REL-010, REL-011), FIFO instead of priorities (FR-016), and no suspend/logind integration (Stage 08 covers battery only).
 - External files are not rolled back by a restore (LIM-007).
 - Simulated battery readings are for demonstration only; a UTM VM normally has no battery.
+
+## First Ubuntu MVP run (commit `43832c3`): shutdown failure in the verification script
+
+**Observed** (owner-reported):
+
+- 166 Linux tests passed.
+- These all passed: genuine DMTCP checkpoint, integrity verification, genuine restore, counter continuity.
+- The final step **failed**: "daemon exit 143, socket left behind, process still running".
+- A manual `kill -TERM` of the real daemon PID made it exit within 3 s, and it removed its socket.
+
+**Cause (script, not daemon).** The script started the daemon with `ng daemon … &`, and `ng` is a shell function. Backgrounding a function makes bash fork a wrapper subshell that starts Python as its child, so `$!` was the wrapper:
+
+- `kill -TERM $!` killed only the wrapper, which is the exit 143 (128 + 15);
+- the daemon never received the signal.
+
+This was reproduced on the Mac with the same pattern.
+
+**Fix:**
+
+- `scripts/lib/daemon-control.sh`. `start_daemon` backgrounds the command itself, so `$!` is the daemon. `stop_daemon`:
+  - signals only a PID whose command line still identifies the daemon;
+  - waits, with a bound, until the process has actually exited (zombies are not counted as running);
+  - collects the daemon's own exit status;
+  - requires its socket to be gone.
+
+  It passes only on status 0 with the socket removed. A timeout, a signal, a non-zero status, or a socket left behind is a FAIL.
+- The MVP script uses these helpers and also checks that the daemon PID no longer exists.
+- No daemon, checkpoint, restore, or security code changed.
+
+**Regression tests** (`tests/unit/test_mvp_shutdown.py`):
+
+- with a fake daemon: `$!` is the daemon, a clean stop passes, a socket left behind fails, a non-zero exit fails, an ignored SIGTERM times out (and is not claimed stopped), and a process that is not ours is never signalled;
+- the script starts the daemon directly and stops it only through the helper;
+- the real daemon, in a subprocess, exits 0 on SIGTERM, removes its socket, and records its workload as STOPPED.

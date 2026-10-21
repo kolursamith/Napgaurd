@@ -27,12 +27,14 @@ OUT="$HOME/napguard-mvp-evidence-$STAMP"
 DATA="$HOME/.local/share/napguard-mvp-check/$STAMP"
 SOCK="${XDG_RUNTIME_DIR:-/nonexistent}/napguard-mvp-check/daemon.sock"
 VERDICT=PASS
-DAEMON_PID=
 export PYTHONDONTWRITEBYTECODE=1
+# shellcheck source=lib/daemon-control.sh
+. "$REPO/scripts/lib/daemon-control.sh"   # start_daemon / stop_daemon (sets DAEMON_PID, DAEMON_RC)
 
 finish() {
-  if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
-    kill -TERM "$DAEMON_PID"; wait "$DAEMON_PID" 2>/dev/null
+  if [ -n "$DAEMON_PID" ]; then   # an early exit: still stop the daemon, and say how it went
+    stop_daemon "$SOCK" 60 napguard.main || \
+      echo "FAIL: daemon (pid $DAEMON_PID) did not stop cleanly: status $DAEMON_RC" | tee -a "$OUT/verdict.txt"
   fi
   [ -d "$DATA" ] && tar -C "$(dirname "$DATA")" --exclude='*.dmtcp' --exclude='*.temp' \
     -czf "$OUT/mvp-data.tgz" "$(basename "$DATA")" 2>/dev/null
@@ -90,8 +92,10 @@ listeners > "$OUT/listeners-before.txt"; non_loopback "$OUT/listeners-before.txt
 
 if [ "$RUN" = yes ]; then
   step "5. Start the user-level daemon (developer mode)"
-  ng daemon --i-accept-single-user-coordinator --data-dir "$DATA" > "$OUT/daemon.log" 2>&1 &
-  DAEMON_PID=$!
+  start_daemon "$OUT/daemon.log" env PYTHONPATH="$REPO/src" python3 -s -m napguard.main \
+    --socket "$SOCK" daemon --i-accept-single-user-coordinator --data-dir "$DATA"
+  echo "daemon pid $DAEMON_PID: $(ps -o args= -p "$DAEMON_PID")" | tee -a "$OUT/steps.txt"
+  ps -o args= -p "$DAEMON_PID" | grep -q 'napguard.main' || blocked "\$! is not the daemon process"
   for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.2; done
   [ -S "$SOCK" ] || { cat "$OUT/daemon.log"; blocked "daemon socket did not appear"; }
   [ "$(stat -c %a "$SOCK")" = 600 ] || failed "socket mode is $(stat -c %a "$SOCK"), not 600"
@@ -119,11 +123,15 @@ if [ "$RUN" = yes ]; then
   sleep 2
   ng stop "$WID" > "$OUT/stop-restored.txt" 2>&1 || failed "stopping the restored instance failed"
 
-  step "7. Stop the daemon"
-  kill -TERM "$DAEMON_PID"; wait "$DAEMON_PID"; rc=$?; DAEMON_PID=
+  step "7. Stop the daemon (SIGTERM; wait for it to exit and remove its socket)"
+  pid=$DAEMON_PID
+  if stop_daemon "$SOCK" 60 napguard.main; then
+    echo "daemon pid $pid exited with status 0 and removed $SOCK"
+  else
+    failed "daemon pid $pid did not stop cleanly: status $DAEMON_RC, socket $([ -e "$SOCK" ] && echo LEFT || echo removed)"
+  fi
   tail -3 "$OUT/daemon.log"
-  [ $rc -eq 0 ] || failed "daemon exit $rc"
-  [ ! -e "$SOCK" ] || failed "socket left behind"
+  ps -o pid=,args= -p "$pid" > "$OUT/daemon-after-stop.txt" 2>&1 && failed "daemon pid $pid still exists"
 else
   step "5-7. Nothing run (pass --run-demo after reviewing 1-4)"
 fi
