@@ -7,6 +7,7 @@ import platform
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -115,14 +116,57 @@ def test_crash_cleanup_stops_only_identity_matched_processes(tmp_path: Path) -> 
         t.cleanup()
 
 
+def lingering(*args: str) -> subprocess.Popen[bytes]:
+    """A long-lived, unprivileged child whose command line contains `args`.
+
+    (`sleep 30 <path>` cannot be used: sleep rejects the path and exits at once.)
+    """
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", *args],
+                            start_new_session=True)
+
+
+def leaked_pids(marker: Path) -> set[int]:
+    return {p.ident.pid for p in proc.leaked_processes(marker)}
+
+
 @linux_only
 def test_leak_scan_reports_but_does_not_kill(tmp_path: Path) -> None:
     marker = tmp_path / "session"
+    other = tmp_path / "unrelated"
     marker.mkdir()
-    child = subprocess.Popen(["sleep", "30", str(marker)], start_new_session=True)
+    other.mkdir()
+    children: list[subprocess.Popen[bytes]] = []
     try:
-        assert [p.ident.pid for p in proc.leaked_processes(marker)] == [child.pid]
-        assert child.poll() is None
+        child = lingering(str(marker))
+        children.append(child)
+        unrelated = lingering(str(other))
+        children.append(unrelated)
+        assert proc.wait_until(lambda: child.pid in leaked_pids(marker), 10), (
+            f"child exited early ({child.poll()}) or was never discovered")
+        info = proc.read_info(child.pid)
+        assert info is not None
+        time.sleep(0.3)
+        assert leaked_pids(marker) == {child.pid}  # reported; the unrelated child is not
+        assert child.poll() is None and proc.alive(info.ident)  # and nothing was killed
+        assert unrelated.poll() is None
     finally:
-        child.kill()
-        child.wait()
+        for c in children:
+            c.kill()
+            c.wait()
+
+
+@linux_only
+def test_leak_scan_ignores_children_that_already_exited(tmp_path: Path) -> None:
+    marker = tmp_path / "session"
+    marker.mkdir()
+    early = subprocess.Popen([sys.executable, "-c", "pass", str(marker)],
+                             start_new_session=True)
+    try:
+        assert proc.wait_until(lambda: proc.leader_exited_unreaped(early), 10)
+        assert early.pid not in leaked_pids(marker)  # a zombie is not a running leak
+        early.wait()
+        assert early.pid not in leaked_pids(marker)
+    finally:
+        if early.poll() is None:
+            early.kill()
+        early.wait()
