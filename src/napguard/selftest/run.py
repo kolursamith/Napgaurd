@@ -330,6 +330,9 @@ def run_selftest(backend: SelftestBackend, opts: SelftestOptions, *,
         run.steps(build)
     except Blocked as exc:
         run.add("prerequisites", Status.BLOCKED, str(exc))
+    except model.MalformedReport as exc:  # a finished record that is corrupt: never ignored
+        run.facts["malformed_report"] = str(exc)
+        run.add("reports well-formed", Status.FAIL, f"corrupt workload report: {exc}")
     except BackendError as exc:
         run.facts["error"] = exc.to_json()
         run.add(f"backend call ({exc.code})", _classify(exc), exc.message)

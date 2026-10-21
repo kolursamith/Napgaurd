@@ -41,8 +41,9 @@ ROLES = CLASSES["c-threads"].roles
 
 class FakeWorkload(threading.Thread):
     def __init__(self, report: Path, nonce: str, counters: dict[str, int], kpid: int,
-                 die_after: float | None = None) -> None:
+                 die_after: float | None = None, style: str = "normal") -> None:
         super().__init__(daemon=True)
+        self.style = style  # "normal", "split" (each line in two writes), or "corrupt"
         self.report, self.nonce, self.kpid = report, nonce, kpid
         self.counters = dict(counters)
         self.chains = {r: model.DigestChain(nonce, r) for r in ROLES}
@@ -64,7 +65,17 @@ class FakeWorkload(threading.Thread):
                             f"NGSTATE v1 run=managed role={role} pid=1 kpid={self.kpid} "
                             f"nonce={self.nonce} counter={c} digest={self.chains[role].at(c):016x} "
                             f"ballast=- mono_ns={time.monotonic_ns()}\n")
-            if lines:
+            if lines and self.style == "corrupt":
+                lines.insert(0, "NGSTATE v1 run=managed role=main counter=\n")  # finished, bad
+                self.style = "normal"
+            if lines and self.style == "split":  # a reader can see every half-written line
+                for line in lines:
+                    with self.report.open("a", encoding="utf-8") as fh:
+                        fh.write(line[: len(line) // 2])
+                    time.sleep(0.002)
+                    with self.report.open("a", encoding="utf-8") as fh:
+                        fh.write(line[len(line) // 2 :])
+            elif lines:
                 with self.report.open("a", encoding="utf-8") as fh:
                     fh.writelines(lines)
             time.sleep(0.001)
@@ -80,7 +91,8 @@ class FakeWorkload(threading.Thread):
 
 class FakeBackend:
     """Modes: genuine, fresh, no-rollback, survivor, foreign, dies, silent, restore-fails,
-    checkpoint-fails, manifest-tamper, tmpfs, exposure, unavailable."""
+    checkpoint-fails, manifest-tamper, tmpfs, exposure, unavailable, split-writes,
+    corrupt-report."""
 
     def __init__(self, mode: str = "genuine") -> None:
         self.mode = mode
@@ -107,7 +119,8 @@ class FakeBackend:
         session_dir.mkdir(mode=0o700)
         self.ckpt = session_dir
         self.nonce = secrets.token_hex(16)
-        wl = FakeWorkload(self.report, self.nonce, dict.fromkeys(ROLES, 0), 1001)
+        style = {"split-writes": "split", "corrupt-report": "corrupt"}.get(self.mode, "normal")
+        wl = FakeWorkload(self.report, self.nonce, dict.fromkeys(ROLES, 0), 1001, style=style)
         self.workloads["launch"] = wl
         wl.start()
         return self._session("launch", 1001, session_dir)
@@ -149,7 +162,8 @@ class FakeBackend:
             wl = FakeWorkload(self.report, self.nonce, self.workloads["launch"].snapshot(), 2002)
         else:
             wl = FakeWorkload(self.report, self.nonce, self.snapshot, 2002,
-                              die_after=0.15 if self.mode == "dies" else None)
+                              die_after=0.15 if self.mode == "dies" else None,
+                              style="split" if self.mode == "split-writes" else "normal")
         self.workloads["restore"] = wl
         wl.start()
         return self._session("restore", 2002, options.session_dir)
@@ -279,3 +293,57 @@ def test_reference_source_is_the_stage02_verified_workload() -> None:
     assert packaged.read_bytes() == (root / "experiments" / "stage02" / "workload"
                                      / "ngcounter.c").read_bytes()
     assert os.access(packaged, os.R_OK)
+
+
+# --------------------------------------- report reading while the workload writes (Ubuntu)
+
+GOOD = ("NGSTATE v1 run=managed role=main pid=1 kpid=1001 nonce=" + "ab" * 16 +
+        " counter={c} digest={d:016x} ballast=- mono_ns=5\n")
+
+
+def good(c: int) -> str:
+    return GOOD.format(c=c, d=model.digest_at("ab" * 16, "main", c))
+
+
+def test_a_partial_trailing_line_is_left_for_a_later_poll(tmp_path: Path) -> None:
+    report = tmp_path / "managed.txt"
+    line = good(20)
+    # The exact fragment seen on Ubuntu: a write still in progress.
+    report.write_text(good(10) + line[: line.index("counter=") + 8], encoding="utf-8")
+    assert [o.counter for o in model.read_reports(report)] == [10]
+    mark = model.count_lines(report)
+    assert mark == 1  # the half-written line is not counted, so it is not skipped later
+    with report.open("a", encoding="utf-8") as fh:
+        fh.write(line[line.index("counter=") + 8 :])
+    assert [o.counter for o in model.read_reports(report, mark)] == [20]
+    assert model.complete_lines("a\nb") == ["a"] and model.complete_lines("a\n") == ["a"]
+    assert model.complete_lines("") == []
+
+
+@pytest.mark.parametrize("bad", [
+    "NGSTATE v1 run=managed role=main pid=1 kpid=1001 nonce=" + "ab" * 16 + " counter=\n",
+    good(10).replace("counter=10", "counter=ten"),
+    good(10).replace("v1", "v2"),
+    good(10).replace("nonce=" + "ab" * 16, "nonce=xyz"),
+    good(10).replace(" digest=", " digest=zz"),
+    good(10).replace(" mono_ns=5", ""),
+])
+def test_malformed_finished_records_are_still_rejected(tmp_path: Path, bad: str) -> None:
+    report = tmp_path / "managed.txt"
+    report.write_text(good(10) + bad, encoding="utf-8")
+    with pytest.raises(model.MalformedReport):
+        model.read_reports(report)
+
+
+def test_split_writes_do_not_break_a_genuine_restore(tmp_path: Path) -> None:
+    result, backend = selftest(tmp_path, "split-writes")
+    assert result.status is Status.PASS, result.to_json()
+
+
+def test_a_corrupt_finished_report_is_a_failure_with_cleanup(tmp_path: Path) -> None:
+    result, backend = selftest(tmp_path, "corrupt-report")
+    assert result.status is Status.FAIL
+    check = next(c for c in result.checks if c.name == "reports well-formed")
+    assert check.status is Status.FAIL and "missing" in check.detail
+    assert statuses(result)["processes cleaned up"] is Status.PASS
+    assert backend.cleaned == ["launch"] and backend.leak_scan(tmp_path) == []

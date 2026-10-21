@@ -148,15 +148,30 @@ def parse_lines(lines: Iterable[str], first_line_no: int = 1) -> list[Observatio
     return found
 
 
+def complete_lines(text: str) -> list[str]:
+    """Newline-terminated lines only.
+
+    A report file is appended to while it is read. A trailing fragment without its newline
+    is a write still in progress: it is left out (not consumed and not an error), and it
+    is read in full by a later poll once the writer finishes it. Complete lines are parsed
+    strictly, so a malformed finished record still raises `MalformedReport`.
+    """
+    return text.split("\n")[:-1]
+
+
+def _read(path: Path) -> list[str]:
+    return complete_lines(path.read_text(encoding="utf-8", errors="replace"))
+
+
 def read_reports(path: Path, start_line: int = 0) -> list[Observation]:
-    """Observations from line index ``start_line`` onward (0-based)."""
+    """Observations from complete line index ``start_line`` onward (0-based)."""
     if not path.exists():
         return []
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return parse_lines(lines[start_line:], first_line_no=start_line + 1)
+    return parse_lines(_read(path)[start_line:], first_line_no=start_line + 1)
 
 
 def count_lines(path: Path) -> int:
+    """Complete lines so far: a mark taken mid-write never skips the line being written."""
     if not path.exists():
         return 0
-    return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+    return len(_read(path))

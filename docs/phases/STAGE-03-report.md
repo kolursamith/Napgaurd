@@ -28,7 +28,7 @@
 | `src/napguard/checkpoint/dmtcp_completion.py` | Verified completion wait (code identical to the Stage 02 `ckptwait.py`) |
 | `src/napguard/checkpoint/dmtcp.py` | `DmtcpBackend`: probe (version **and** pinned source commit), assess, launch, status, checkpoint, stop, restore, adopt, audit, diagnostics, cleanup |
 | `src/napguard/checkpoint/criu.py` | CRIU **probe only** (`--version`, `getcap`); every operation is refused (OD-14); no `criu check`, no sudo |
-| `src/napguard/selftest/` | Reference workload `ngcounter.c` (byte-identical to Stage 02), state model (identical to Stage 02), continuity verifier, self-test runner |
+| `src/napguard/selftest/` | Reference workload `ngcounter.c` (byte-identical to Stage 02), state model (Stage 02 rules; the file reader now reads only complete lines, see section 11), continuity verifier, self-test runner |
 | `src/napguard/cli.py` | `napguard-dev backend probe`, `assess`, `selftest --i-accept-single-user-coordinator`, `cleanup` (`backend …` aliases) |
 | `scripts/stage03-ubuntu-check.sh` | Ubuntu gate: prerequisites by default; one self-test only with `--run-selftest` |
 
@@ -87,7 +87,7 @@
 - The fd-821 loopback hand-off and the isolation audit.
 - The verified completion wait (code identical).
 - Process identity, adoption, and group termination.
-- The reference workload and its state model (byte-identical).
+- The reference workload (byte-identical) and its state model (identical digest, ballast, and parsing rules; only complete, newline-terminated lines are read).
 - The continuity rules: same nonce; first restored counter in `[ckpt_lower, kill)`; digests; ballast; progress; original confirmed dead. The port adds a refusal of checkpoints at counter 0.
 - Non-reaping restarter diagnostics.
 
@@ -207,6 +207,35 @@ All of these must hold on Ubuntu, from one `--run-selftest` run:
 
 **If the same socket appears again** and is owned by this user, or by an unknown owner, the self-test still FAILs. The new evidence (owner UID, inode, session PIDs) will then identify it.
 
-## 11. Not started
+## 11. Report-reading race in the Linux test run (commit `5042e1e5`)
+
+**Observed** (user-reported). On Ubuntu, the Stage 00 baseline passed, but the Stage 03 Linux tests gave **133 passed, 1 failed**:
+
+- `test_genuine_restore_passes_every_check` raised `MalformedReport` on a half-written line ending in `counter=`;
+- the real DMTCP self-test was not run.
+
+**Cause.** The self-test polls the report file while the workload appends to it. `read_reports()` and `count_lines()` used `splitlines()`, which also returns an unfinished last line:
+
+- the strict parser rejected that line;
+- a mark taken mid-write could make a later read start after the line and skip that record.
+
+The fake workload made this likely because it appends several lines through a buffered file object. The real C workload writes each line with one `write()`, but a concurrent reader can still in principle see a partial line. The old reader, run on the exact fragment, raises the reported error.
+
+**Fix:**
+
+- Only newline-terminated lines are read and counted (`model.complete_lines`). A trailing fragment is left for a later poll, so it is neither an error nor skipped.
+- Complete records are parsed exactly as strictly as before.
+- A malformed **complete** record now ends the self-test as a recorded FAIL ("reports well-formed"), with cleanup.
+
+**Tests:**
+
+- `test_a_partial_trailing_line_is_left_for_a_later_poll`;
+- `test_malformed_finished_records_are_still_rejected` (6 cases);
+- `test_split_writes_do_not_break_a_genuine_restore` (every line written in two halves);
+- `test_a_corrupt_finished_report_is_a_failure_with_cleanup`.
+
+No coordinator or network-audit rule changed.
+
+## 12. Not started
 
 Stage 03b and later stages, daemon integration, multi-user use, production coordinator use, Python or socket-holding workloads, and any CRIU operation.
