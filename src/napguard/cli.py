@@ -52,7 +52,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
     for caps in (dmtcp, criu):
         lines.append(f"{caps.name}: available={caps.available} version={caps.version} "
                      f"verified={caps.verified} arch={caps.arch} "
-                     f"os={caps.os_id} {caps.os_version_id}")
+                     f"os={caps.os_id} {caps.os_version_id} "
+                     f"source_commit={caps.source_commit or 'unknown'}")
         lines += [f"  tool {n}: {p}" for n, p in caps.tool_paths.items()]
         lines.append(f"  self-check: {caps.self_check}")
         lines += [f"  note: {n}" for n in caps.notes]

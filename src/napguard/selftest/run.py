@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from napguard.checkpoint.artifacts import PERSISTENT_FS
 from napguard.checkpoint.base import (
     BackendCapabilities,
     BackendError,
@@ -33,6 +34,7 @@ from napguard.checkpoint.base import (
     WorkloadSpec,
 )
 from napguard.checkpoint.compatibility import Compatibility, CompatibilityReport
+from napguard.checkpoint.manifest import read_manifest, write_manifest
 from napguard.core.proc import filtered_env
 
 from . import model
@@ -215,6 +217,15 @@ class _Run:
         self.add("checkpoint verified complete", Status.PASS,
                  f"{len(images)} image(s), {sum(a.size for a in images)} bytes, "
                  f"{capture.capture_ms} ms (completion verified, never by exit status)")
+        fs = str(capture.restore_hints.get("filesystem", "?"))
+        if self.add("artifacts on persistent filesystem",
+                    Status.PASS if fs in PERSISTENT_FS else Status.FAIL,
+                    f"checkpoint directory is on {fs} (PLT-007: never tmpfs/ramfs)") \
+                is not Status.PASS:
+            return
+        ckpt_dir = Path(session.data["checkpoint_dir"])
+        manifest = write_manifest(ckpt_dir, self.backend.capture_record(capture))
+        self.facts["manifest"] = str(manifest)
         done_line = model.count_lines(self.report)
         if not self.wait_reports(done_line, 1, session, "after checkpoint"):
             self.add("workload continued after checkpoint", Status.FAIL,
@@ -238,10 +249,13 @@ class _Run:
         if not original_dead:
             return
 
-        record = self.backend.capture_record(capture)
+        record = read_manifest(ckpt_dir)  # INVALID_MANIFEST / CORRUPT refuse the restore
+        self.add("manifest validated", Status.PASS,
+                 f"{len(record.artifacts)} artifact(s); digest, schema, names and limitation "
+                 "statements (LIM-007: external files are not rolled back) checked")
         started_ns = time.monotonic_ns()
         restored_session = self.backend.restore(
-            record, Path(session.data["checkpoint_dir"]),
+            record, ckpt_dir,
             RestoreOptions(session_dir=self.opts.work_dir / "session-restore",
                            working_dir=self.opts.work_dir), self.deadline())
         self.sessions.append(restored_session)

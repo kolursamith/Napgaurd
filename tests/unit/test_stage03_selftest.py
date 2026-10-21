@@ -79,8 +79,8 @@ class FakeWorkload(threading.Thread):
 
 
 class FakeBackend:
-    """Modes: genuine, fresh, no-rollback, survivor, foreign, dies, restore-fails,
-    checkpoint-fails, exposure, unavailable."""
+    """Modes: genuine, fresh, no-rollback, survivor, foreign, dies, silent, restore-fails,
+    checkpoint-fails, manifest-tamper, tmpfs, exposure, unavailable."""
 
     def __init__(self, mode: str = "genuine") -> None:
         self.mode = mode
@@ -104,6 +104,8 @@ class FakeBackend:
 
     def launch(self, spec: WorkloadSpec, session_dir: Path, deadline: float) -> BackendSession:
         self.report = Path(spec.argv[spec.argv.index("--report") + 1])
+        session_dir.mkdir(mode=0o700)
+        self.ckpt = session_dir
         self.nonce = secrets.token_hex(16)
         wl = FakeWorkload(self.report, self.nonce, dict.fromkeys(ROLES, 0), 1001)
         self.workloads["launch"] = wl
@@ -115,15 +117,20 @@ class FakeBackend:
         if self.mode == "checkpoint-fails":
             raise BackendError(ErrorCode.CHECKPOINT_FAILED, "fake checkpoint failure")
         self.snapshot = self.workloads["launch"].snapshot()
+        fs = "tmpfs" if self.mode == "tmpfs" else "ext4"
         return CaptureResult([ArtifactEntry("ckpt.dmtcp", ArtifactRole.IMAGE, 9, "0" * 64)],
-                             {"expected_processes": 1}, 7, "")
+                             {"expected_processes": 1, "filesystem": fs}, 7, "")
 
     def capture_record(self, capture: CaptureResult) -> CaptureRecord:
-        return CaptureRecord("fake", "4.2.0", {}, "aarch64", "6.8", list(capture.artifacts), {})
+        return CaptureRecord("fake", "4.2.0", {"fake_tool": "1" * 64}, "aarch64", "6.8",
+                             list(capture.artifacts), dict(capture.restore_hints))
 
     def stop(self, session: BackendSession) -> bool:
         if self.mode == "survivor":
             return False  # the original could not be confirmed dead
+        if self.mode == "manifest-tamper":
+            path = self.ckpt / "napguard-manifest.json"
+            path.write_text(path.read_text().replace('"size": 9', '"size": 10'))
         self.workloads["launch"].stop()
         return True
 
@@ -133,7 +140,10 @@ class FakeBackend:
         if self.mode == "restore-fails":
             raise BackendError(ErrorCode.RESTORE_FAILED, "dmtcp_restart exited within 1 s",
                                detail={"restarter_exit": {"how": "CLD_DUMPED", "signal": 11}})
-        if self.mode == "fresh":  # "restore" merely starts a new process
+        if self.mode == "silent":  # the restore command runs, but nothing is restored
+            wl = FakeWorkload(self.report.with_name("nowhere.txt"), self.nonce, self.snapshot,
+                              2002)
+        elif self.mode == "fresh":  # "restore" merely starts a new process
             wl = FakeWorkload(self.report, secrets.token_hex(16), dict.fromkeys(ROLES, 0), 2002)
         elif self.mode == "no-rollback":  # continues from termination, not from the checkpoint
             wl = FakeWorkload(self.report, self.nonce, self.workloads["launch"].snapshot(), 2002)
@@ -188,6 +198,8 @@ def test_genuine_restore_passes_every_check(tmp_path: Path) -> None:
     assert got["original terminated"] is Status.PASS
     assert got["restored process owned by this restore"] is Status.PASS
     assert got["processes cleaned up"] is Status.PASS
+    assert got["manifest validated"] is Status.PASS
+    assert got["artifacts on persistent filesystem"] is Status.PASS
     assert backend.cleaned == ["restore", "launch"]
     saved = tmp_path / "run" / "selftest-result.json"
     assert saved.stat().st_mode & 0o777 == 0o600
@@ -199,6 +211,8 @@ def test_genuine_restore_passes_every_check(tmp_path: Path) -> None:
     ("survivor", "original terminated", "status"),
     ("foreign", "restored process owned by this restore", "NOT adoptable"),
     ("dies", "restored process stayed alive", "exited"),
+    ("silent", "restored workload reporting", "report(s) within"),
+    ("tmpfs", "artifacts on persistent filesystem", "tmpfs"),
 ])
 def test_no_false_pass(tmp_path: Path, mode: str, check: str, why: str) -> None:
     result, backend = selftest(tmp_path, mode)
@@ -208,12 +222,17 @@ def test_no_false_pass(tmp_path: Path, mode: str, check: str, why: str) -> None:
     assert statuses(result)["processes cleaned up"] is Status.PASS
 
 
-@pytest.mark.parametrize("mode", ["checkpoint-fails", "restore-fails"])
-def test_failed_checkpoint_or_restore_is_fail_and_cleans_up(tmp_path: Path, mode: str) -> None:
+@pytest.mark.parametrize(("mode", "code"), [("checkpoint-fails", "CHECKPOINT_FAILED"),
+                                           ("restore-fails", "RESTORE_FAILED"),
+                                           ("manifest-tamper", "INVALID_MANIFEST")])
+def test_failed_checkpoint_restore_or_manifest_is_fail_and_cleans_up(
+        tmp_path: Path, mode: str, code: str) -> None:
     result, backend = selftest(tmp_path, mode)
     assert result.status is Status.FAIL
     assert "launch" in backend.cleaned and backend.leak_scan(tmp_path) == []
-    assert result.facts["error"]["code"] in ("CHECKPOINT_FAILED", "RESTORE_FAILED")
+    assert result.facts["error"]["code"] == code
+    if mode == "manifest-tamper":
+        assert "restore" not in backend.workloads  # an invalid manifest refuses the restore
 
 
 def test_exposure_is_fail_and_unavailable_backend_is_blocked(tmp_path: Path) -> None:

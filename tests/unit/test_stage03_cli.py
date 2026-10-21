@@ -77,3 +77,29 @@ def test_cleanup_stops_only_recorded_identities(tmp_path: Path,
     finally:
         bystander.kill()
         bystander.wait()
+
+
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "stage03-ubuntu-check.sh"
+SHA = "a" * 40
+
+
+@pytest.mark.parametrize("args", [[], ["abc"], [SHA, "--class", "py"], [SHA, "--class", "tcp"],
+                                  [SHA, "--class", "c-file-grow"], [SHA, "--bogus"],
+                                  [SHA, "--class"], [SHA.upper()]])
+def test_ubuntu_script_arguments_are_strict(args: list[str]) -> None:
+    done = subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True,
+                          timeout=30)
+    assert done.returncode == 2 and "usage:" in done.stderr
+
+
+def test_ubuntu_script_gates_and_defaults() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert "sudo" not in code and "setcap" not in code and "sysctl" not in code
+    assert 'RUN=no' in code  # prerequisite-only unless --run-selftest is given
+    assert code.count("--i-accept-single-user-coordinator") == 1  # only in the self-test step
+    for gate in ('[ "$HEAD_SHA" = "$EXPECTED" ]', "git status --porcelain", "uname -m",
+                 'VERSION_ID:-}" = 24.04', "PINNED_COMMIT=f8009ce7b4ad211311ca2f72a929b975e4aa1155",
+                 "grep -qi skipped", "No coordinator was started", "comm -13",
+                 "pgrep -u"):
+        assert gate in code, gate

@@ -51,7 +51,8 @@ def elf_bytes(machine: int = 183) -> bytes:
 
 def make_tools(tmp_path: Path, version: str = "4.2.0", launch: str | None = None,
                coordinator: str | None = None, command: str | None = None,
-               restart: str | None = None) -> dmtcp.DmtcpTools:
+               restart: str | None = None, commit: str = dmtcp.PINNED_COMMIT
+               ) -> dmtcp.DmtcpTools:
     bindir = tmp_path / "dmtcp" / "bin"
     bindir.mkdir(parents=True)
     head = f'#!/bin/sh\nif [ "$1" = "--version" ]; then echo "dmtcp_launch (DMTCP) {version}"; ' \
@@ -65,6 +66,8 @@ def make_tools(tmp_path: Path, version: str = "4.2.0", launch: str | None = None
         else:
             tool.write_text(head + (body or "sleep 60\n"), encoding="utf-8")
         tool.chmod(0o700)
+    (tmp_path / "dmtcp" / dmtcp.BUILD_INFO).write_text(
+        f"version={version}\ncommit={commit}\n", encoding="utf-8")
     found = dmtcp.find_tools(tmp_path / "dmtcp")
     assert found is not None
     return found
@@ -138,6 +141,12 @@ def test_verified_only_on_the_stage02_platform(tmp_path: Path) -> None:
     assert caps.verified_classes == ["c-single", "c-threads", "c-file-static", "c-file-grow"]
     other = backend(tmp_path / "x", platform_facts={**VERIFIED, "os_version_id": "22.04"})
     assert other.probe().available and not other.probe().verified
+    unpinned = dmtcp.DmtcpBackend(tools=make_tools(tmp_path / "y", commit="0" * 40),
+                                  platform_facts=dict(VERIFIED))
+    caps = unpinned.probe()
+    assert caps.available and not caps.verified and caps.source_commit == "0" * 40
+    assert any("not the pinned" in n for n in caps.notes)
+    assert backend(tmp_path / "z").probe().source_commit == dmtcp.PINNED_COMMIT
 
 
 # ------------------------------------------------------- refusals (no spawn)
@@ -361,6 +370,7 @@ def test_checkpoint_timeout_leaves_workload_running_then_cleanup(tmp_path: Path)
         assert b.status(session).state is SessionState.ALIVE  # workload left running
     finally:
         assert b.cleanup(session, None) == []
+    assert b.cleanup(session, None) == [] and b.close_all() == []  # safe to repeat
     assert recorded_alive(tmp_path / "s") == []
 
 

@@ -34,6 +34,7 @@ class ErrorCode(StrEnum):
     CANCELLED = "CANCELLED"
     INVALID_ARGUMENT = "INVALID_ARGUMENT"
     INVALID_ARTIFACTS = "INVALID_ARTIFACTS"
+    INVALID_MANIFEST = "INVALID_MANIFEST"
     INSECURE_ARTIFACT = "INSECURE_ARTIFACT"
     CORRUPT = "CORRUPT"
     INTERNAL = "INTERNAL"
@@ -82,6 +83,7 @@ class BackendCapabilities:
     verified: bool  # True only on the Stage 02-verified (backend, version, platform)
     verified_classes: list[str]
     notes: list[str] = field(default_factory=list)
+    source_commit: str | None = None  # pinned build revision, when recorded
 
 
 @dataclass(frozen=True)

@@ -30,6 +30,7 @@ class ReasonCode(StrEnum):
     SOCKETS_HELD = "SOCKETS_HELD"
     MULTI_PROCESS = "MULTI_PROCESS"
     DEVICE_STATE = "DEVICE_STATE"
+    GUI_TOOLKIT = "GUI_TOOLKIT"
     STATIC_BINARY = "STATIC_BINARY"
     SETUID = "SETUID"
     NOT_ELF = "NOT_ELF"
@@ -51,6 +52,9 @@ MESSAGES: dict[ReasonCode, str] = {
         "not reviewed for Stage 03a."),
     ReasonCode.DEVICE_STATE: (
         "The workload has a device open. Device and GPU state is not restored (LIM-004)."),
+    ReasonCode.GUI_TOOLKIT: (
+        "The workload uses a GUI toolkit or display-server library. GUI programs keep "
+        "display-server connections and are not supported (EXC-001)."),
     ReasonCode.STATIC_BINARY: (
         "The executable is statically linked; DMTCP needs a dynamically linked program."),
     ReasonCode.SETUID: (
@@ -77,6 +81,7 @@ VERIFIED_PLATFORM = {"backend": "dmtcp", "version": "4.2.0", "arch": "aarch64",
 
 _PYTHON_NAME = re.compile(r"^(python|pypy)\d*(\.\d+)*[a-z]*$")
 _LIBPYTHON = re.compile(r"^libpython\d")
+_GUI_LIBS = re.compile(r"^(libX11|libxcb|libwayland-client|libgtk-|libgdk-|libQt\dGui|libSDL2)")
 ELF_MACHINES = {"aarch64": 183, "x86_64": 62}
 _ALLOWED_DEVICES = ("/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom",
                     "/dev/tty", "/dev/ptmx")
@@ -217,6 +222,9 @@ def runtime_findings(facts: RuntimeFacts, protected_fds: range) -> list[Finding]
                and link not in _ALLOWED_DEVICES and not link.startswith(_ALLOWED_DEVICE_PREFIXES)]
     if devices:
         found.append(Finding(ReasonCode.DEVICE_STATE, ", ".join(devices[:10])))
+    gui = sorted(p for p in facts.mapped if _GUI_LIBS.match(os.path.basename(p)))
+    if gui:
+        found.append(Finding(ReasonCode.GUI_TOOLKIT, ", ".join(gui[:3])))
     python = sorted(p for p in facts.mapped if _LIBPYTHON.match(os.path.basename(p)))
     if is_python_name(facts.exe) or python:
         found.append(Finding(ReasonCode.KNOWN_RESTORE_FAILURE,

@@ -18,6 +18,33 @@ from pathlib import Path
 
 from .base import ArtifactEntry, ArtifactRole, BackendError, ErrorCode
 
+PERSISTENT_FS = frozenset({"ext4", "xfs", "btrfs"})  # PLT-007: never tmpfs or ramfs
+
+
+def filesystem_type(path: Path, mounts: str = "/proc/self/mounts") -> str:
+    """Filesystem type of the mount holding `path` ("?" if unknown)."""
+    best, kind = "", "?"
+    target = str(path.resolve())
+    try:
+        lines = Path(mounts).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return kind
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mount_point = parts[1].replace("\\040", " ")
+        under = target == mount_point or target.startswith(mount_point.rstrip("/") + "/")
+        if under and len(mount_point) > len(best):
+            best, kind = mount_point, parts[2]
+    return kind
+
+
+def fsync_dir(path: Path) -> None:
+    """Make renames/creations in a private directory durable."""
+    with private_dir(path) as dfd:
+        os.fsync(dfd)
+
 
 def check_name(name: str) -> str:
     """A single, plain file name: no directories, '..', NUL, or hidden-path tricks."""

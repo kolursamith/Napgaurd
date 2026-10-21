@@ -23,6 +23,8 @@ Declaring the methods `async` now would not make them non-blocking. Each body wo
    - a passed deadline raises `BackendError(TIMED_OUT)`;
    - a timed-out checkpoint leaves the workload running.
 3. **Stage 06 integration.** The daemon calls the backend through `asyncio.to_thread`, at most one call per workload (FR-014). Cancellation stays `NOT_SUPPORTED` for DMTCP, as the contract allows.
+   - **Nothing else calls the backend directly.** The GUI (Stage 10) and the CLI (FR-032) reach the backend only through the daemon's IPC, so a backend call can never block the GUI's event loop.
+   - A deadline bounds every worker thread, so a stuck engine cannot hold a daemon thread forever (REL-008).
 4. **Contract updates.** The contract document keeps the async sketch and notes this ADR. It is revisited in Stage 06 if a native async adapter is needed.
 
 ## Consequences

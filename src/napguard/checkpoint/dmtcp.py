@@ -78,6 +78,8 @@ from .dmtcp_completion import parse_dmtcp_status, wait_for_checkpoint
 from .policy import CoordinatorPolicy, single_user_host_findings
 
 ANALYSED_VERSION = "4.2.0"  # the fd-821 hand-off was analysed for this version only
+PINNED_COMMIT = "f8009ce7b4ad211311ca2f72a929b975e4aa1155"  # dmtcp tag v4.2.0 (ADR 0005)
+BUILD_INFO = "napguard-build-info.txt"  # written by experiments/stage02/build-dmtcp.sh
 PROTECTED_COORD_FD = 821  # PROTECTED_FD_START (820) + 1, include/protectedfds.h
 PROTECTED_FDS = range(820, 860)  # DMTCP's own descriptors; below 820 belongs to the workload
 LOOPBACK = "127.0.0.1"
@@ -136,6 +138,19 @@ def sha256_file(path: str) -> str:
         for block in iter(lambda: fh.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def build_commit(tools: DmtcpTools) -> str | None:
+    """Source commit recorded by the pinned build script next to the tools, if any."""
+    info = Path(tools.launch).parent.parent / BUILD_INFO
+    try:
+        for line in info.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "commit":
+                return value.strip()
+    except OSError:
+        return None
+    return None
 
 
 def host_platform() -> dict[str, str]:
@@ -241,9 +256,13 @@ class DmtcpBackend:
             self._tool_sha = {n: sha256_file(p) for n, p in self.tools.paths().items()}
         return dict(self._tool_sha)
 
+    def source_commit(self) -> str | None:
+        return build_commit(self.tools) if self.tools is not None else None
+
     def platform_verified(self) -> bool:
         p = self.platform
         return (self.version == VERIFIED_PLATFORM["version"]
+                and self.source_commit() == PINNED_COMMIT
                 and p.get("arch") == VERIFIED_PLATFORM["arch"]
                 and p.get("os_id") == VERIFIED_PLATFORM["os_id"]
                 and p.get("os_version_id") == VERIFIED_PLATFORM["os_version_id"])
@@ -259,13 +278,18 @@ class DmtcpBackend:
                          f"{ANALYSED_VERSION} (UNANALYSED_VERSION)")
         available = self.tools is not None and version == ANALYSED_VERSION
         verified = available and self.platform_verified()
-        if available and not verified:
+        if available and self.source_commit() != PINNED_COMMIT:
+            notes.append(f"DMTCP source commit {self.source_commit() or 'unknown'} is not the "
+                         f"pinned {PINNED_COMMIT} ({BUILD_INFO} missing or different): "
+                         "workloads are UNKNOWN at best")
+        elif available and not verified:
             notes.append("platform differs from the Stage 02-verified Ubuntu 24.04 aarch64: "
                          "workloads are UNKNOWN at best")
         notes.append("coordinators run only in Stage 03a developer mode (ADR 0006); "
                      "not production-approved")
         return BackendCapabilities(
             name=self.name, available=available, version=version,
+            source_commit=self.source_commit(),
             tool_paths=self.tools.paths() if self.tools else {},
             tool_sha256=self.tool_sha256() if self.tools else {},
             arch=self.platform.get("arch", "?"),
@@ -552,6 +576,7 @@ class DmtcpBackend:
                                f"coordinator status after checkpoint is {fields}", detail=detail)
         images = [i.name for i in waited.evidence.images]
         scripts = list(waited.evidence.scripts)
+        artifacts.fsync_dir(live.ckpt_dir)  # images are renamed into place: make it durable
         entries = artifacts.inspect_all(
             live.ckpt_dir, [(n, ArtifactRole.IMAGE) for n in images]
             + [(n, ArtifactRole.RESTART_SCRIPT) for n in scripts])
@@ -559,6 +584,7 @@ class DmtcpBackend:
         excerpt = "\n".join(proc.log_tail(coord.stderr_path, 40))[-4096:]
         return CaptureResult(entries, {"images": images, "restart_scripts": scripts,
                                        "expected_processes": live.expected_images,
+                                       "filesystem": artifacts.filesystem_type(live.ckpt_dir),
                                        "port_at_capture": live.port},
                              int((time.monotonic() - started) * 1000), excerpt)
 
