@@ -176,6 +176,37 @@ All of these must hold on Ubuntu, from one `--run-selftest` run:
 5. Since Stage 02 the workload inherits an allow-listed environment and umask 077, and runs under a new device-descriptor rule. These are unverified with real DMTCP until the Ubuntu run; problems would show as FAIL or BLOCKED.
 6. `CANDIDATE` is not used: anything without evidence is `UNKNOWN`.
 
-## 10. Not started
+## 10. First Ubuntu self-test: network-audit failure during restore (commit `e81c0102`)
+
+**Observed** (user-reported):
+
+- Run `~/.local/share/napguard-dev/selftest/20261021T053011Z-c-single-75b9`.
+- These steps passed: checkpoint verified; artifacts on a persistent filesystem; original terminated; manifest validated; restore started.
+- The run then **failed** with `PERMISSION_DENIED: network exposure after restore`.
+- The listener was UDP, `0.0.0.0:50304`, with no visible owning PID (`[]`).
+- No new non-loopback listener remained after cleanup.
+- **Restored-state continuity was not verified.** This run is a FAIL, and it stays recorded as one.
+
+**Analysis:**
+
+1. **The rule.** Since Stage 02, the guard's second rule counted **every** new non-loopback listener of **any** owner as exposure.
+2. **UDP sockets are listed even when nobody listens.** UDP has no listening state, so `ss -l -u` lists every unconnected UDP socket, including a system service's short-lived client socket on `0.0.0.0:<ephemeral>` (DNS, time sync, mDNS).
+3. **The socket was not ours.** `ss -p` names owners only for processes whose descriptors this user can read, that is, our own. A socket with no visible owner therefore belongs to another account.
+4. **It does not fit DMTCP.** DMTCP's documented restore-time exposure is a **TCP** listener for images that contain sockets (I-1c). The workload holds none; the precheck verifies this.
+5. **Not proven.** The evidence did not record the socket's owner, so it is not proven that the socket was a host socket.
+
+**Change (narrow):**
+
+- `ss` now runs with `-e`. Each socket's kernel owner UID and inode are parsed from the end of the line, so a process name cannot spoof them.
+- A new non-loopback socket is set aside only if it is provably owned by root or a system account and no process of ours is attached. It is recorded in `host_sockets_seen` with protocol, address, UID, inode, and step.
+- **Still FAIL:** new listeners of this user, of another regular user, or of unknown owner; any listener of a session process.
+- **Unchanged:** the coordinator isolation checks (loopback-only TCP listener on the handed-over port, wildcard-bind refusal, IPv4/IPv6 reachability).
+- Exposure errors now also record the observation time, the session's PIDs and process identities, and the host sockets seen.
+- Regression tests: `test_ss_details_give_the_kernel_owner_and_resist_spoofed_names`, `test_new_system_account_udp_socket_is_noted_not_an_exposure`, `test_other_new_listeners_remain_exposures` (6 cases), `test_session_owned_wildcard_listener_is_always_an_exposure`, `test_host_socket_notes_are_bounded`, `test_exposure_detail_names_owner_inode_and_session`.
+- This clarifies ADR 0006 §1.4. **Owner review requested.**
+
+**If the same socket appears again** and is owned by this user, or by an unknown owner, the self-test still FAILs. The new evidence (owner UID, inode, session PIDs) will then identify it.
+
+## 11. Not started
 
 Stage 03b and later stages, daemon integration, multi-user use, production coordinator use, Python or socket-holding workloads, and any CRIU operation.

@@ -168,6 +168,9 @@ class FakeBackend:
     def restore_diagnostics(self, session: BackendSession) -> dict[str, Any]:
         return {"fake": True}
 
+    def network_notes(self, session: BackendSession) -> list[dict[str, Any]]:
+        return []
+
     def cleanup(self, session: BackendSession | None, path: Path | None) -> list[str]:
         if session is not None:
             self.workloads[session.session_id].stop()

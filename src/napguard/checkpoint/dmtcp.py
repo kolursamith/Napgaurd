@@ -439,7 +439,8 @@ class DmtcpBackend:
     def _audit(self, live: _Live, step: str) -> None:
         """Kill the session and fail on any exposure, or if the audit cannot run."""
         try:
-            exposed = live.guard.violations(self._session_pids(live))
+            pids = self._session_pids(live)
+            exposed = live.guard.violations(pids, step)
         except AuditError as exc:
             self._abort(live, f"listener audit failed after {step}")
             raise BackendError(ErrorCode.PERMISSION_DENIED,
@@ -447,7 +448,18 @@ class DmtcpBackend:
         if exposed:
             self._abort(live, f"network exposure after {step}")
             raise BackendError(ErrorCode.PERMISSION_DENIED, f"network exposure after {step}",
-                               detail={"listeners": [vars(x) for x in exposed]})
+                               detail=self._exposure_detail(live, step, exposed, pids))
+
+    @staticmethod
+    def _exposure_detail(live: _Live, step: str, exposed: Sequence[Any],
+                         pids: set[int]) -> dict[str, Any]:
+        """Bounded evidence: each listener's protocol, address, owner uid, inode, and
+        visible pids, plus who this session's processes were when it was seen."""
+        return {"step": step, "observed_utc": proc.utc_now(), "own_uid": os.getuid(),
+                "listeners": [vars(x) for x in list(exposed)[:20]],
+                "session_pids": sorted(pids)[:50],
+                "session_processes": live.tracker.records()[:50],
+                "host_sockets_seen": list(live.guard.notes)[:20]}
 
     def _abort(self, live: _Live, reason: str) -> None:
         live.tracker.event("abort", reason=reason)
@@ -689,6 +701,11 @@ class DmtcpBackend:
         """Live processes of this user that still reference `path`. Reported, never killed."""
         return [f"pid {p.ident.pid}" for p in proc.leaked_processes(path)]
 
+    def network_notes(self, session: BackendSession) -> list[dict[str, Any]]:
+        """Host sockets of system accounts seen (and not counted) during this session."""
+        live = self._live.get(session.session_id)
+        return list(live.guard.notes) if live is not None else []
+
     def restore_diagnostics(self, session: BackendSession) -> dict[str, Any]:
         live = self._live.get(session.session_id)
         return self.restore_diagnostics_live(live) if live is not None else {}
@@ -703,6 +720,7 @@ class DmtcpBackend:
             "restarter_stderr_tail": proc.log_tail(wl.stderr_path if wl else None, 60),
             "restarter_stdout_tail": proc.log_tail(wl.stdout_path if wl else None, 20),
             "coordinator_log_tail": proc.log_tail(live.coordinator.stderr_path, 30),
+            "host_sockets_seen": list(live.guard.notes)[:20],
         }
 
     # ------------------------------------------------------- cancel/cleanup

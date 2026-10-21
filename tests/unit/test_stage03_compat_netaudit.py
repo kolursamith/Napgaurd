@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import struct
 from pathlib import Path
@@ -138,3 +139,78 @@ def test_wildcard_bind_is_refused_next_to_a_loopback_listener() -> None:
         assert netaudit.wildcard_bind_refused(listener.getsockname()[1]) is True
     finally:
         listener.close()
+
+
+# ------------------- socket ownership: host sockets vs session exposure (Ubuntu e81c010)
+
+OWN = os.getuid()
+SS_E = (
+    # a system resolver's transient unconnected UDP socket (the Ubuntu observation)
+    "UNCONN 0 0 0.0.0.0:50304 0.0.0.0:* uid:991 ino:44123 sk:1f "
+    "cgroup:/system.slice/systemd-resolved.service <->\n"
+    # root-owned: ss omits uid:0
+    "UNCONN 0 0 0.0.0.0:68 0.0.0.0:* ino:2222 sk:2 <->\n"
+    # our coordinator
+    f'LISTEN 0 128 127.0.0.1:41000 0.0.0.0:* users:(("dmtcp_coordinat",pid=50,fd=821)) '
+    f"uid:{OWN} ino:9 sk:3\n"
+    # a hostile own process name trying to look root-owned
+    f'LISTEN 0 1 0.0.0.0:7000 0.0.0.0:* users:(("x uid:0 ino:1",pid=60,fd=3)) '
+    f"uid:{OWN} ino:77 sk:4\n")
+
+
+def test_ss_details_give_the_kernel_owner_and_resist_spoofed_names() -> None:
+    parsed = {x.local: x for x in netaudit.parse_ss_listeners(SS_E, "udp")}
+    assert (parsed["0.0.0.0:50304"].uid, parsed["0.0.0.0:50304"].inode) == (991, 44123)
+    assert parsed["0.0.0.0:50304"].pids == ()
+    assert parsed["0.0.0.0:68"].uid == 0  # uid omitted by ss means root
+    assert (parsed["127.0.0.1:41000"].pids, parsed["127.0.0.1:41000"].uid) == ((50,), OWN)
+    spoof = parsed["0.0.0.0:7000"]
+    assert (spoof.uid, spoof.inode, spoof.pids) == (OWN, 77, (60,))  # the last fields win
+    assert netaudit.socket_owner("LISTEN 0 1 0.0.0.0:1 0.0.0.0:*") == (None, None)
+
+
+def L(local: str, uid: int | None, pids: tuple[int, ...] = (), proto: str = "udp",
+      inode: int | None = 5) -> netaudit.Listener:
+    return netaudit.Listener(proto, local, pids, uid, inode)
+
+
+def guard_with(*later: list[netaudit.Listener]) -> netaudit.ListenerGuard:
+    snapshots = [[], *later]
+    return netaudit.ListenerGuard(lambda: snapshots.pop(0))
+
+
+def test_new_system_account_udp_socket_is_noted_not_an_exposure() -> None:
+    resolver = L("0.0.0.0:50304", 991, inode=44123)
+    guard = guard_with([resolver], [resolver])
+    assert guard.violations({4242}, "restore") == []
+    assert guard.violations({4242}, "restore (waiting)") == []
+    assert len(guard.notes) == 1  # recorded once, with its owner and inode
+    note = guard.notes[0]
+    assert (note["proto"], note["local"], note["uid"], note["inode"], note["step"]) == (
+        "udp", "0.0.0.0:50304", 991, 44123, "restore")
+    assert guard_with([L("0.0.0.0:68", 0)]).violations(set()) == []  # root
+    assert guard_with([L("0.0.0.0:5", 65534)]).violations(set()) == []  # nobody
+
+
+@pytest.mark.parametrize("listener", [
+    L("0.0.0.0:50304", OWN),  # this user's socket outside the session (a stray restore)
+    L("0.0.0.0:50304", None, inode=None),  # owner unknown: fail closed
+    L("0.0.0.0:50304", 1001),  # another regular user
+    L("0.0.0.0:50304", 991, pids=(77,)),  # attributed to a process we can see
+    L("[::]:50304", OWN),  # IPv6 wildcard
+    L("0.0.0.0:41000", OWN, proto="tcp"),  # a TCP listener (I-1c restore listener)
+])
+def test_other_new_listeners_remain_exposures(listener: netaudit.Listener) -> None:
+    assert guard_with([listener]).violations(set()) == [listener]
+
+
+def test_session_owned_wildcard_listener_is_always_an_exposure() -> None:
+    # Even with a system uid reported, a non-loopback listener of a session pid fails.
+    coord = L("0.0.0.0:41000", 0, pids=(4242,), proto="tcp")
+    assert guard_with([coord]).violations({4242}) == [coord]
+
+
+def test_host_socket_notes_are_bounded() -> None:
+    many = [L(f"0.0.0.0:{40000 + i}", 991, inode=i) for i in range(200)]
+    guard = guard_with(many)
+    assert guard.violations(set()) == [] and len(guard.notes) == netaudit.MAX_NOTES

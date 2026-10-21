@@ -325,7 +325,8 @@ def recorded_alive(session_dir: Path) -> list[str]:
 
 
 def no_new_exposure(guard: netaudit.ListenerGuard) -> bool:
-    return netaudit.new_non_loopback(netaudit.current_listeners(), guard.baseline) == []
+    """No new non-loopback listener except provable host sockets of system accounts."""
+    return guard.violations(set(), "after test") == []
 
 
 @linux_only

@@ -229,3 +229,21 @@ def test_cleanup_is_safe_to_repeat() -> None:
     assert b.cleanup(unknown, None) == [] and b.close_all() == []
     state = proc.SessionState("/x", None, [])
     assert proc.cleanup_recorded(state) == ([], []) == proc.cleanup_recorded(state)
+
+
+def test_exposure_detail_names_owner_inode_and_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Tracker:
+        def records(self) -> list[dict[str, Any]]:
+            return [{"name": "dmtcp-restart", "pid": 4242, "start_ticks": 9, "uid": 1000,
+                     "boot_id": "b"}]
+
+    class Guard:
+        notes = [{"proto": "udp", "local": "0.0.0.0:50304", "uid": 991}]
+
+    live = type("Live", (), {"tracker": Tracker(), "guard": Guard()})()
+    exposed = [netaudit.Listener("udp", "0.0.0.0:50304", (), 1000, 44123)]
+    detail = dmtcp.DmtcpBackend._exposure_detail(live, "restore", exposed, {4242})
+    assert detail["listeners"][0] == {"proto": "udp", "local": "0.0.0.0:50304", "pids": (),
+                                      "uid": 1000, "inode": 44123}
+    assert detail["session_pids"] == [4242] and detail["session_processes"][0]["pid"] == 4242
+    assert detail["step"] == "restore" and detail["observed_utc"] and detail["host_sockets_seen"]

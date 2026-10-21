@@ -54,6 +54,10 @@ The harness constants `DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED = False` and `CO
 
    Any failure, or an audit that cannot run (for example, `ss` missing), kills the coordinator and fails the operation.
 4. **Continuous audit.** Listener audits run after launch, after checkpoint, every ~0.5 s while waiting for a restore, and after restore. They compare against a baseline and check ownership. A violation kills every process of the session and raises `BackendError(PERMISSION_DENIED, "network exposure")`.
+   - **Clarification of the baseline rule (2026-10-21; owner review requested).** A NEW non-loopback socket is not counted as session exposure only when the kernel reports it as owned by root or a system account (UID < 1000, or 65534) **and** no process of ours is attached to it. Such sockets are recorded with protocol, address, UID, inode, and step.
+   - **Why it is safe.** Every session process runs as this user and is never setuid, so it cannot own such a socket.
+   - **What still fails:** every other new non-loopback listener, including this user's, another regular user's, or one of unknown owner, and every non-loopback listener of a session process.
+   - **Why it was needed.** Ubuntu's `ss -l -u` also lists the short-lived unconnected UDP client sockets of system services. One appeared during the first Ubuntu self-test (Stage 03 report section 10).
 5. **Lifetime and files.** The coordinator's port file and logs live in the session directory (mode 0700, files 0600). The coordinator stops when its session ends; stopping is verified by process identity.
    - It is **UNVERIFIED** whether a DMTCP worker survives the loss of its coordinator. Stage 03 must test this before any code relies on either answer.
 
