@@ -15,15 +15,19 @@ from typing import Any
 from napguard.checkpoint.base import BackendError
 from napguard.storage.catalog import Catalog
 
+from .history import History, HistoryError
 from .manager import Manager, ManagerError
 
-KINDS = ("launch", "stop", "checkpoint", "verify", "restore")
+KINDS = ("launch", "stop", "checkpoint", "verify", "restore", "archive", "unarchive",
+         "archive_checkpoint", "unarchive_checkpoint", "delete_history", "delete_checkpoint",
+         "reset_demo")
 
 
 class Executor:
-    def __init__(self, catalog: Catalog, manager: Manager) -> None:
+    def __init__(self, catalog: Catalog, manager: Manager, history: History | None = None) -> None:
         self.catalog = catalog
         self.manager = manager
+        self.history = history or History(catalog, manager.data_dir, manager.is_live)
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="napguard-ops", daemon=True)
@@ -55,7 +59,17 @@ class Executor:
             return self.manager.checkpoint(str(wid), str(op["trigger"] or "manual"))
         if kind == "verify":
             return self.manager.verify(str(cid))
-        return self.manager.restore(str(cid))
+        if kind == "restore":
+            return self.manager.restore(str(cid))
+        if kind in ("archive", "unarchive"):
+            return self.history.archive(str(wid), archived=kind == "archive")
+        if kind in ("archive_checkpoint", "unarchive_checkpoint"):
+            return self.history.archive_checkpoint(str(cid), archived=kind == "archive_checkpoint")
+        if kind == "delete_history":
+            return self.history.delete(list(op["params"].get("workload_ids", [])))
+        if kind == "delete_checkpoint":
+            return self.history.delete_checkpoint(str(cid))
+        return self.history.reset_demo()
 
     def run_one(self, op_id: str) -> None:
         op = self.catalog.operation(op_id)
@@ -65,7 +79,7 @@ class Executor:
         started = time.monotonic()
         try:
             result = self._dispatch(op)
-        except (BackendError, ManagerError) as exc:
+        except (BackendError, ManagerError, HistoryError) as exc:
             code = str(exc.code)
             detail = getattr(exc, "detail", {})
             self.catalog.finish_operation(op_id, False, int((time.monotonic() - started) * 1000),

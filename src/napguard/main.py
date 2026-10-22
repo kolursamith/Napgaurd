@@ -7,7 +7,10 @@
     napguard checkpoints [WORKLOAD] | verify CHECKPOINT | restore CHECKPOINT --yes
     napguard schedule [--enable | --disable] [--interval SECONDS]
     napguard battery [--simulate PERCENT [--ac]] [--clear-simulation]
-    napguard gui
+    napguard operations [--limit N] | run-scheduler | diagnostics
+    napguard archive WORKLOAD | unarchive WORKLOAD | history | clear-history --yes
+    napguard reset-demo --yes | shutdown --yes
+    napguard gui [--smoke]
 
 Operations wait for their outcome unless --no-wait is given. Exit status: 0 success,
 1 the operation failed, 2 refused, invalid, or the daemon is unavailable.
@@ -107,6 +110,49 @@ def cmd_client(args: argparse.Namespace) -> int:
                  f"{e['message']}" for e in reversed(rows)]
         _print(rows, args.json, "\n".join(lines) or "no events")
         return 0
+    if cmd == "operations":
+        rows = client.call("operations.list", limit=args.limit)
+        _print(rows, args.json, "\n".join(
+            f"{o['created_utc']}  {o['kind']:<17} {o['state']:<10} {o.get('trigger') or '':<24} "
+            f"{o.get('workload_id') or o.get('checkpoint_id') or ''} {o.get('error_code') or ''}"
+            for o in rows) or "no operations")
+        return 0
+    if cmd == "history":
+        p = client.call("history.preview")
+        lines = [f"deletable {e['workload_id']}: {e['instances']} instance(s), {e['checkpoints']} "
+                 f"checkpoint(s), {e['files']} file(s), {e['bytes']} B in {e['directory']}"
+                 for e in p["eligible"]]
+        lines += [f"kept      {b['workload_id']}: {b['reason']}" for b in p["blocked"]]
+        _print(p, args.json, "\n".join(lines) or "no history")
+        return 0
+    if cmd == "diagnostics":
+        d = client.call("diagnostics.export")
+        _print(d, args.json, f"diagnostics written to {d['path']} ({d['bytes']} B)")
+        return 0
+    if cmd == "run-scheduler":
+        r = client.call("scheduler.run_now")
+        ops = [wait_operation(client.call, o) for o in r["operation_ids"]]
+        _print(ops, args.json, "\n".join(f"{o['kind']} {o['workload_id']}: {o['state']}"
+                                         for o in ops))
+        return 0 if all(o["state"] == "SUCCEEDED" for o in ops) else 1
+    if cmd in ("archive", "unarchive"):
+        return _operation(client, args, "history.archive", workload_id=args.workload,
+                          archived=cmd == "archive")
+    if cmd in ("clear-history", "reset-demo", "shutdown"):
+        if not args.yes:
+            print(f"{cmd}: add --yes to confirm (see `napguard history` for a preview)",
+                  file=sys.stderr)
+            return 2
+        if cmd == "shutdown":
+            _print(client.call("daemon.shutdown", confirm=True), args.json, "daemon stopping")
+            return 0
+        if cmd == "reset-demo":
+            return _operation(client, args, "history.reset_demo", confirm=True)
+        ids = [e["workload_id"] for e in client.call("history.preview")["eligible"]]
+        if not ids:
+            _print({"deleted": []}, args.json, "nothing to delete")
+            return 0
+        return _operation(client, args, "history.delete", workload_ids=ids, confirm=True)
     if cmd == "launch-demo":
         return _operation(client, args, "workloads.launch_demo", workload_class=args.workload_class)
     if cmd == "stop":
@@ -181,12 +227,26 @@ def parser() -> argparse.ArgumentParser:
     group.add_argument("--enable", action="store_true")
     group.add_argument("--disable", action="store_true")
     sc.add_argument("--interval", type=int)
+    ops = sub.add_parser("operations")
+    ops.add_argument("--limit", type=int, default=30)
+    for name in ("history", "diagnostics", "run-scheduler"):
+        sub.add_parser(name)
+    for name in ("archive", "unarchive"):
+        a = sub.add_parser(name)
+        a.add_argument("workload")
+        a.add_argument("--no-wait", action="store_true")
+    for name in ("clear-history", "reset-demo", "shutdown"):
+        y = sub.add_parser(name)
+        y.add_argument("--yes", action="store_true")
+        y.add_argument("--no-wait", action="store_true")
     b = sub.add_parser("battery")
     b.add_argument("--simulate", type=int, metavar="PERCENT",
                    help="SIMULATED reading for demonstration only")
     b.add_argument("--ac", action="store_true")
     b.add_argument("--clear-simulation", action="store_true")
-    sub.add_parser("gui", help="open the desktop GUI")
+    g = sub.add_parser("gui", help="open the desktop GUI")
+    g.add_argument("--smoke", action="store_true",
+                   help="render every screen for a few seconds, then exit (needs a display)")
     return p
 
 
@@ -198,7 +258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "gui":
             from napguard.ui.gui import main as gui_main
 
-            return gui_main(str(_socket(args)))
+            return gui_main(str(_socket(args)), smoke=bool(args.smoke))
         return cmd_client(args)
     except IpcError as exc:
         print(f"error: {exc.code}: {exc.message}", file=sys.stderr)

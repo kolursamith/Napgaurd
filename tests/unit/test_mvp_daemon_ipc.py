@@ -21,7 +21,7 @@ from napguard.daemon import ipc
 from napguard.daemon.ipc import Client, IpcError
 from napguard.daemon.service import Service, validate, wait_operation
 from napguard.power.battery import BatteryMonitor
-from napguard.ui import view
+from napguard.ui import presenter as view
 
 linux_only = pytest.mark.skipif(platform.system() != "Linux", reason="needs SO_PEERCRED")
 
@@ -213,9 +213,9 @@ def test_schema_and_views() -> None:
         validate("events.list", {"limit": True})  # a bool is not an int
     with pytest.raises(IpcError):
         validate("workloads.stop", {"workload_id": "x" * 300})
-    assert view.battery_text({"available": True, "simulated": True, "percent": 9,
+    assert view.battery_long({"available": True, "simulated": True, "percent": 9,
                               "charging": False, "ac_online": False}).startswith("SIMULATED")
-    assert view.event_row({"ts_utc": "t", "kind": "k", "message": "m", "simulated": True})[2] \
+    assert view.event_text({"ts_utc": "t", "kind": "k", "message": "m", "simulated": True}) \
         == "[SIMULATED] m"
     assert view.human_bytes(25_059_040) == "23.9 MiB"
 

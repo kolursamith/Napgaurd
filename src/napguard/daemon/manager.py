@@ -152,7 +152,8 @@ class Manager:
         iid = new_id("in")
         session_dir = work / "session-launch-1"
         with self.catalog.tx() as db:
-            db.execute("INSERT INTO workloads VALUES (?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO workloads(id, name, workload_class, argv, work_dir, "
+                       "report_path, created_utc) VALUES (?,?,?,?,?,?,?)",
                        (wid, f"demo {workload_class}", workload_class, json.dumps(argv), str(work),
                         str(report), utc_now()))
             db.execute("INSERT INTO instances(id, workload_id, origin, session_dir, state, "
@@ -385,7 +386,16 @@ class Manager:
         self.catalog.event("restore.verified", f"restored {checkpoint_id}: continuity verified "
                            "(original nonce, rolled-back counter, progress)",
                            checkpoint_id=checkpoint_id, instance_id=iid, pid=session.pid)
+        facts = checks[0]["facts"] if checks else {}
+        first: dict[str, Any] = facts if isinstance(facts, dict) else {}
         return {"checkpoint_id": checkpoint_id, "instance_id": iid, "pid": session.pid,
+                "original_pid": source["pid"], "restored_pid": session.pid,
+                "original_nonce": first.get("nonce"), "restored_nonce": first.get("restored_nonce"),
+                "counter_at_checkpoint": first.get("ckpt_lower"),
+                "counter_before_termination": first.get("kill_counter"),
+                "first_restored_counter": first.get("restored_first_counter"),
+                "last_restored_counter": first.get("restored_last_counter"),
+                "continuity_verified": all(c["status"] == "PASS" for c in checks),
                 "continuity": checks}
 
     # --------------------------------------------------------- monitoring
@@ -415,25 +425,91 @@ class Manager:
                 found.append((wid, str(inst["started_utc"])))
         return found
 
-    def workloads(self) -> list[dict[str, Any]]:
-        rows = self.catalog.query("SELECT * FROM workloads ORDER BY created_utc DESC")
+    def is_live(self, workload_id: str) -> bool:
+        return self._live_instance(workload_id) is not None
+
+    def progress(self, report: Path) -> dict[str, dict[str, Any]]:
+        """Newest observed report per role, read from the END of the report file only."""
+        try:
+            with report.open("rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - 16384))
+                text = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return {}
+        lines = model.complete_lines(text)[1:]  # the first may be cut by the seek
+        found: dict[str, dict[str, Any]] = {}
+        for line in lines:
+            try:
+                obs = model.parse_line(line)
+            except model.MalformedReport:
+                continue
+            if obs is not None:
+                found[obs.role] = {"counter": obs.counter, "nonce": obs.nonce, "kpid": obs.kpid}
+        return found
+
+    def _pending(self, workload_id: str) -> dict[str, Any] | None:
+        return self.catalog.one(
+            "SELECT id, kind, state, trigger FROM operations WHERE state IN ('QUEUED','RUNNING') "
+            "AND (workload_id=? OR checkpoint_id IN (SELECT id FROM checkpoints WHERE "
+            "workload_id=?)) ORDER BY created_utc LIMIT 1", (workload_id, workload_id))
+
+    def workloads(self, include_archived: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM workloads"
+        if not include_archived:
+            sql += " WHERE archived_utc IS NULL"
+        rows = self.catalog.query(sql + " ORDER BY created_utc DESC")
         for w in rows:
             w["argv"] = json.loads(w["argv"])
             inst = self.catalog.one("SELECT * FROM instances WHERE workload_id=? ORDER BY "
                                     "started_utc DESC, rowid DESC LIMIT 1", (w["id"],))
             w["instance"] = inst
             w["live"] = self._live_instance(w["id"]) is not None
+            w["pending_operation"] = self._pending(w["id"])
+            w["last_checkpoint"] = self.catalog.one(
+                "SELECT id, generation, state, created_utc FROM checkpoints WHERE workload_id=? "
+                "ORDER BY created_utc DESC, rowid DESC LIMIT 1", (w["id"],))
+            w["last_operation"] = self.catalog.one(
+                "SELECT id, kind, state, trigger, error_code, message, ended_utc FROM operations "
+                "WHERE workload_id=? OR checkpoint_id IN (SELECT id FROM checkpoints WHERE "
+                "workload_id=?) ORDER BY created_utc DESC, rowid DESC LIMIT 1", (w["id"], w["id"]))
+            w["progress"] = self.progress(Path(w["report_path"])) if w["live"] else {}
+            w["archived"] = w["archived_utc"] is not None
         return rows
 
-    def checkpoints(self, workload_id: str | None = None) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM checkpoints"
-        args: tuple[Any, ...] = ()
+    def eligibility(self, row: dict[str, Any]) -> tuple[bool, str]:
+        """Whether a checkpoint can be restored now, and why not (same rules as restore())."""
+        if row["state"] != "PUBLISHED":
+            return False, {"SUPERSEDED": "superseded: a newer generation overwrote this image",
+                           "CORRUPT": "integrity verification failed",
+                           "MISSING": "its files are missing"}.get(row["state"], row["state"])
+        if self.is_live(str(row["workload_id"])):
+            return False, "the workload is running: stop it first"
+        if self._pending(str(row["workload_id"])) is not None:
+            return False, "an operation for this workload is queued or running"
+        src = self.catalog.one("SELECT state, kill_line FROM instances WHERE id=?",
+                               (row["instance_id"],))
+        if src is None or src["state"] != "STOPPED" or src["kill_line"] is None:
+            return False, "the checkpointed instance was not stopped through NapGuard"
+        return True, "eligible: newest PUBLISHED generation of a stopped workload"
+
+    def checkpoints(self, workload_id: str | None = None,
+                    include_archived: bool = False) -> list[dict[str, Any]]:
+        clauses, args = [], []
         if workload_id:
-            sql += " WHERE workload_id=?"
-            args = (workload_id,)
-        rows = self.catalog.query(sql + " ORDER BY created_utc DESC, rowid DESC", args)
+            clauses.append("workload_id=?")
+            args.append(workload_id)
+        if not include_archived:
+            clauses.append("archived_utc IS NULL")
+        sql = "SELECT * FROM checkpoints" + (" WHERE " + " AND ".join(clauses) if clauses else "")
+        rows = self.catalog.query(sql + " ORDER BY created_utc DESC, rowid DESC", tuple(args))
         for r in rows:
             r["marks"] = json.loads(r["marks"])
+            r["restore_eligible"], r["eligibility_reason"] = self.eligibility(r)
+            r["restores"] = self.catalog.query(
+                "SELECT id, state, started_utc, pid FROM instances WHERE checkpoint_id=? ORDER BY "
+                "started_utc", (r["id"],))
+            r["archived"] = r["archived_utc"] is not None
         return rows
 
     def shutdown(self) -> list[str]:

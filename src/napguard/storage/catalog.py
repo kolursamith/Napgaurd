@@ -20,7 +20,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Additive migrations (never drop or rewrite data): version -> [(table, column, type)].
+MIGRATIONS = {2: [("workloads", "archived_utc", "TEXT"), ("checkpoints", "archived_utc", "TEXT")]}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workloads(
@@ -82,9 +84,28 @@ class Catalog:
                 if stmt.strip():
                     self._db.execute(stmt)
             with self.tx() as db:
-                db.execute("INSERT OR IGNORE INTO meta VALUES ('schema_version', ?)",
-                           (str(SCHEMA_VERSION),))
+                db.execute("INSERT OR IGNORE INTO meta VALUES ('schema_version', '1')")
+            self.migrations_applied = self._migrate()
         path.chmod(0o600)
+
+    def schema_version(self) -> int:
+        row = self.one("SELECT value FROM meta WHERE key='schema_version'")
+        return int(row["value"]) if row else 0
+
+    def _migrate(self) -> list[int]:
+        """Additive, idempotent, one transaction per version; existing rows are kept."""
+        applied = []
+        for version in sorted(MIGRATIONS):
+            if self.schema_version() >= version:
+                continue
+            with self.tx() as db:
+                for table, column, kind in MIGRATIONS[version]:
+                    cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+                    if column not in cols:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+                db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(version),))
+            applied.append(version)
+        return applied
 
     def pragmas(self) -> dict[str, Any]:
         with self._lock:

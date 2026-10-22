@@ -19,6 +19,7 @@ ADR 0006 allows DMTCP coordinators only in Stage 03a developer mode, and says th
    - Without the flag, launch, checkpoint, and restore are refused, and status, history, and verification still work.
    - `DMTCP_LOOPBACK_ONLY_COORDINATOR_VERIFIED` stays `False`.
    - The daemon reports `production_authorized: false`.
+   - **Clarification (2026-10-22, owner review requested).** The GUI can start the daemon in developer mode only after the user confirms the same acknowledgement in a dialog. That covers that daemon run only and is never stored. The optional systemd user unit never passes the flag, so it runs in refused mode.
 2. **Workloads.** Only NapGuard's verified reference classes `c-single` and `c-threads` can be launched. External processes are never attached (EXC-008).
 3. **Images are not relocated** (deviation from ADR 0003's staging-to-`published/` rename).
    - Images stay where DMTCP wrote them, as in the verified Stage 03a path.

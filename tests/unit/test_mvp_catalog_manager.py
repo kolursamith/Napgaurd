@@ -35,7 +35,8 @@ def test_catalog_pragmas_and_reconciliation(tmp_path: Path) -> None:
     op = cat.add_operation("checkpoint", "wl-1")
     cat.start_operation(op)
     with cat.tx() as db:
-        db.execute("INSERT INTO workloads VALUES ('wl-1','d','c-single','[]','/x','/x/r',"
+        db.execute("INSERT INTO workloads(id, name, workload_class, argv, work_dir, report_path, "
+                   "created_utc) VALUES ('wl-1','d','c-single','[]','/x','/x/r',"
                    "'2026-01-01T00:00:00Z')")
         db.execute("INSERT INTO instances(id, workload_id, origin, session_dir, state, "
                    "started_utc) VALUES ('in-1','wl-1','LAUNCH','/x','RUNNING','t')")
