@@ -38,12 +38,34 @@ def short_dir() -> Iterator[Path]:
         shutil.rmtree(d, ignore_errors=True)
 
 
+FAKE_SYSTEMCTL = """#!/bin/sh
+# Test stub: logs every call; answers FragmentPath from $FAKE_FRAGMENT (empty by default).
+echo "$@" >> "$SYSTEMCTL_LOG"
+case "$*" in *FragmentPath*) printf '%s\\n' "${FAKE_FRAGMENT:-}" ;; esac
+exit 0
+"""
+
+
 def sandbox_env(base: Path) -> dict[str, str]:
+    """A sandboxed user: HOME, XDG data/config/RUNTIME dirs, and a stub systemctl, so the
+    scripts can never see the real user's daemon or touch the real systemd user manager."""
     home = base / "home"
     home.mkdir()
+    runtime = base / "run"
+    runtime.mkdir(mode=0o700)
+    stubs = base / "stubs"
+    stubs.mkdir()
+    (stubs / "systemctl").write_text(FAKE_SYSTEMCTL)
+    (stubs / "systemctl").chmod(0o755)
     return dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(home / ".local" / "share"),
-                XDG_CONFIG_HOME=str(home / ".config"),
-                PATH=f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+                XDG_CONFIG_HOME=str(home / ".config"), XDG_RUNTIME_DIR=str(runtime),
+                SYSTEMCTL_LOG=str(base / "systemctl.log"),
+                PATH=f"{stubs}{os.pathsep}{Path(sys.executable).parent}{os.pathsep}"
+                     f"{os.environ['PATH']}")
+
+
+def sh(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["bash", *args], env=env, capture_output=True, text=True, timeout=120)
 
 
 def test_install_uninstall_and_purge_in_a_sandbox(short_dir: Path) -> None:
@@ -185,3 +207,89 @@ def test_cli_parity_for_history_and_operations(short_dir: Path,
         assert cli.main([*sock, "reset-demo", "--yes"]) == 0
     finally:
         service.shutdown()
+
+
+
+# ------------------------------------------- Ubuntu 87b89a1 regression: purge and systemd
+
+
+def installed(short_dir: Path) -> tuple[dict[str, str], Path]:
+    env = sandbox_env(short_dir)
+    done = sh(env, str(ROOT / "scripts" / "install.sh"), "--with-systemd")
+    assert done.returncode == 0, done.stdout + done.stderr
+    data = Path(env["XDG_DATA_HOME"]) / "napguard"
+    (data / "workloads").mkdir(parents=True, exist_ok=True)
+    (data / "workloads" / "f").write_text("x")
+    return env, data
+
+
+def test_purge_is_not_blocked_by_another_daemons_socket(short_dir: Path) -> None:
+    # On Ubuntu the user's real GUI daemon socket in $XDG_RUNTIME_DIR made the purge refuse.
+    import socket as socketlib
+
+    env, data = installed(short_dir)
+    (Path(env["XDG_RUNTIME_DIR"]) / "napguard").mkdir()
+    other = socketlib.socket(socketlib.AF_UNIX)
+    other.bind(str(Path(env["XDG_RUNTIME_DIR"]) / "napguard" / "daemon.sock"))
+    try:
+        done = sh(env, str(ROOT / "scripts" / "uninstall.sh"), "--purge", "--yes")
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert not data.exists()
+    finally:
+        other.close()
+
+
+def test_purge_refuses_while_a_daemon_uses_this_data_directory(short_dir: Path) -> None:
+    env, data = installed(short_dir)
+    holder = subprocess.Popen([sys.executable, "-c", (
+        "import fcntl, os, sys, time; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600);"
+        " fcntl.flock(fd, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(60)"),
+        str(data / "daemon.lock")], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "locked"
+        done = sh(env, str(ROOT / "scripts" / "uninstall.sh"), "--purge", "--yes")
+        assert done.returncode == 1 and "is using" in done.stderr
+        assert (data / "workloads" / "f").exists()  # nothing purged
+    finally:
+        holder.kill()
+        holder.wait()
+    done = sh(env, str(ROOT / "scripts" / "uninstall.sh"), "--purge", "--yes")
+    assert done.returncode == 0 and not data.exists()
+
+
+def test_purge_still_needs_explicit_confirmation(short_dir: Path) -> None:
+    env, data = installed(short_dir)
+    done = subprocess.run(["bash", str(ROOT / "scripts" / "uninstall.sh"), "--purge"], env=env,
+                          input="no\n", capture_output=True, text=True, timeout=60)
+    assert done.returncode == 1 and "not purged" in done.stdout and data.exists()
+
+
+@pytest.mark.parametrize("ours", [False, True])
+def test_uninstall_touches_systemd_only_for_its_own_unit(short_dir: Path, ours: bool) -> None:
+    env, _ = installed(short_dir)
+    unit = Path(env["XDG_CONFIG_HOME"]) / "systemd" / "user" / "napguard.service"
+    env["FAKE_FRAGMENT"] = str(unit) if ours else "/home/someone/.config/systemd/user/napguard.service"
+    done = sh(env, str(ROOT / "scripts" / "uninstall.sh"))
+    assert done.returncode == 0, done.stdout + done.stderr
+    calls = Path(env["SYSTEMCTL_LOG"]).read_text().splitlines()
+    acting = [c for c in calls if "FragmentPath" not in c]
+    if ours:
+        assert acting == ["--user stop napguard.service", "--user disable napguard.service",
+                          "--user daemon-reload"]
+    else:
+        assert acting == []  # a foreign or real unit is never stopped or reloaded
+    assert not unit.exists()
+
+
+def test_one_daemon_per_data_directory(short_dir: Path) -> None:
+    first, _ = start(short_dir)
+    try:
+        with pytest.raises(IpcError) as err:
+            Service(short_dir / "data", short_dir / "run2" / "d.sock", FakeBackend(),
+                    coordinator_acknowledged=False, build=fake_build, require_persistent=False)
+        assert err.value.code == "ALREADY_RUNNING"
+    finally:
+        first.shutdown()
+    again = Service(short_dir / "data", short_dir / "run2" / "d.sock", FakeBackend(),
+                    coordinator_acknowledged=False, build=fake_build, require_persistent=False)
+    again.shutdown()  # the lock was released by the first shutdown

@@ -10,6 +10,7 @@ status, history and verification still work.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import signal
@@ -106,6 +107,14 @@ class Service:
                  ) -> None:
         data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         data_dir.chmod(0o700)
+        # One daemon per data directory; uninstall --purge checks this lock (not sockets).
+        self._data_lock = os.open(data_dir / "daemon.lock",
+                                  os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(self._data_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(self._data_lock)
+            raise IpcError("ALREADY_RUNNING", f"another NapGuard daemon uses {data_dir}") from exc
         fs = filesystem_type(data_dir)
         if require_persistent and fs not in PERSISTENT_FS:
             raise IpcError("STORAGE_NOT_PERSISTENT", f"{data_dir} is on {fs} (PLT-007)")
@@ -394,6 +403,7 @@ class Service:
         self.catalog.event("daemon.stopped", "daemon stopped; managed workloads were stopped",
                            problems=problems)
         self.catalog.close()
+        os.close(self._data_lock)  # releases the data-directory lock
         return problems
 
     def run_until_signal(self) -> int:

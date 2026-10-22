@@ -18,9 +18,15 @@ MANIFEST="$DATA_HOME/napguard/install-manifest.txt"
 MARKER="Installed by NapGuard scripts/install.sh"
 [ "$(id -u)" -ne 0 ] || { echo "do not run as root" >&2; exit 2; }
 
-if [ -f "$CONFIG_HOME/systemd/user/napguard.service" ] && command -v systemctl >/dev/null; then
-  systemctl --user stop napguard 2>/dev/null
-  systemctl --user disable napguard 2>/dev/null
+UNIT="$CONFIG_HOME/systemd/user/napguard.service"
+OWN_UNIT=no   # true only if the user manager runs the unit file THIS install created
+if [ -f "$UNIT" ] && grep -q "$MARKER" "$UNIT" && command -v systemctl >/dev/null; then
+  loaded=$(systemctl --user show -p FragmentPath --value napguard.service 2>/dev/null)
+  if [ "$loaded" = "$UNIT" ]; then
+    OWN_UNIT=yes
+    systemctl --user stop napguard.service
+    systemctl --user disable napguard.service
+  fi
 fi
 if [ -f "$MANIFEST" ]; then
   while IFS= read -r path; do
@@ -36,11 +42,26 @@ if [ -f "$MANIFEST" ]; then
 else
   echo "no install manifest at $MANIFEST: nothing to remove"
 fi
-command -v systemctl >/dev/null && systemctl --user daemon-reload 2>/dev/null
+[ "$OWN_UNIT" = no ] || systemctl --user daemon-reload
 
 if [ "$PURGE" = yes ]; then
-  if [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/napguard/daemon.sock" ]; then
-    echo "a NapGuard daemon is running: stop it first (Settings & Help > Stop Daemon & Exit)" >&2
+  # Refuse only if a daemon is using THIS data directory (it holds daemon.lock there).
+  # A socket in $XDG_RUNTIME_DIR says nothing about which data directory it serves.
+  if ! PYTHONPATH="$REPO/src" python3 -s - "$DATA_HOME/napguard/daemon.lock" <<'PY'
+import fcntl, os, sys
+path = sys.argv[1]
+if not os.path.exists(path):
+    sys.exit(0)
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)
+sys.exit(0)
+PY
+  then
+    echo "a NapGuard daemon is using $DATA_HOME/napguard: stop it first" \
+         "(Settings & Help > Stop Daemon & Exit, or: napguard shutdown --yes)" >&2
     exit 1
   fi
   if [ "$YES" != yes ]; then

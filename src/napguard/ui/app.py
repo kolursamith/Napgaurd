@@ -12,10 +12,8 @@ from __future__ import annotations
 import functools
 import json
 import os
-import queue
 import subprocess
 import sys
-import threading
 import time
 import tkinter as tk
 import traceback
@@ -31,6 +29,7 @@ from napguard.selftest.run import CLASSES
 
 from . import presenter as pr
 from . import theme
+from .worker import Worker
 
 REFRESH_MS = 2000
 PAGES = ("Dashboard", "Processes", "Checkpoints", "Recovery", "Automation", "Simulation Lab",
@@ -59,39 +58,6 @@ def save_config(path: Path, data: dict[str, Any]) -> None:
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     tmp.chmod(0o600)
     tmp.replace(path)
-
-
-class Worker:
-    """Runs daemon calls off the Tk thread, in order; results return via after()."""
-
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.jobs: queue.Queue[tuple[Callable[[], Any], Callable[[Any], None],
-                                     Callable[[IpcError], None]]] = queue.Queue()
-        threading.Thread(target=self._run, daemon=True).start()
-
-    def submit(self, fn: Callable[[], Any], ok: Callable[[Any], None],
-               err: Callable[[IpcError], None]) -> None:
-        self.jobs.put((fn, ok, err))
-
-    def _run(self) -> None:
-        while True:
-            fn, ok, err = self.jobs.get()
-            try:
-                result = fn()
-            except IpcError as exc:
-                self._post(err, exc)
-            except Exception as exc:
-                self._post(err, IpcError("INTERNAL", repr(exc), {"traceback":
-                                                                  traceback.format_exc()}))
-            else:
-                self._post(ok, result)
-
-    def _post(self, fn: Callable[[Any], None], value: Any) -> None:
-        try:
-            self.root.after(0, fn, value)
-        except (RuntimeError, tk.TclError):
-            pass  # the window is closing
 
 
 class Tooltip:
@@ -1350,14 +1316,16 @@ def main(socket_path: str, smoke: bool = False) -> int:
         for name in app.pages:
             app.show(name)
             root.update()
-        deadline = time.monotonic() + 4.0
-        while time.monotonic() < deadline:
+        # Wait for a REAL answer from the daemon (a completed status/list round trip), not
+        # a fixed delay; "connected" is reported only if that answer arrived.
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline and not (app.store.connected and app.store.status):
             root.update()
             time.sleep(0.05)
-        for name in app.pages:
+        for name in app.pages:  # render every screen again, now with live data
             app.show(name)
             root.update()
-        connected = app.store.connected
+        connected = app.store.connected and app.store.status is not None
         root.destroy()
         if errors:
             print("\n".join(errors), file=sys.stderr)
