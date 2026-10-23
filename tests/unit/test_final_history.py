@@ -19,7 +19,7 @@ from napguard.daemon.ops import Executor
 from napguard.storage.catalog import Catalog
 
 
-def setup(tmp_path: Path) -> tuple[Manager, Executor]:
+def make_manager(tmp_path: Path) -> tuple[Manager, Executor]:
     data = tmp_path / "data"
     data.mkdir(mode=0o700, parents=True)
     m = Manager(Catalog(data / "catalog.db"), FakeBackend(), data, build=fake_build,
@@ -67,7 +67,7 @@ def test_v1_database_is_migrated_without_losing_data(tmp_path: Path) -> None:
 
 
 def test_archive_hides_and_never_touches_live_workloads(tmp_path: Path) -> None:
-    m, ex = setup(tmp_path)
+    m, ex = make_manager(tmp_path)
     live = m.launch_demo("c-threads")["workload_id"]
     done, _ = finished(m)
     refused = run(ex, "archive", workload_id=live)
@@ -81,7 +81,7 @@ def test_archive_hides_and_never_touches_live_workloads(tmp_path: Path) -> None:
 
 
 def test_preview_then_delete_only_finished_history(tmp_path: Path) -> None:
-    m, ex = setup(tmp_path)
+    m, ex = make_manager(tmp_path)
     live = m.launch_demo("c-threads")["workload_id"]
     done, _ = finished(m, 2)
     outside = tmp_path / "precious.txt"
@@ -108,7 +108,7 @@ def test_preview_then_delete_only_finished_history(tmp_path: Path) -> None:
 
 
 def test_busy_workloads_and_bad_ids_are_refused(tmp_path: Path) -> None:
-    m, ex = setup(tmp_path)
+    m, ex = make_manager(tmp_path)
     done, cids = finished(m)
     m.catalog.add_operation("restore", None, cids[0])  # queued, not yet run
     assert "queued or running" in str(ex.history.blocked_reason(done))
@@ -120,7 +120,7 @@ def test_busy_workloads_and_bad_ids_are_refused(tmp_path: Path) -> None:
 
 
 def test_delete_checkpoint_never_removes_a_newer_generation(tmp_path: Path) -> None:
-    m, ex = setup(tmp_path)
+    m, ex = make_manager(tmp_path)
     wid, (old, new) = finished(m, 2)
     assert run(ex, "delete_checkpoint", checkpoint_id=old)["state"] == "SUCCEEDED"
     assert m.verify(new)["ok"] is True  # the newest image is intact and restorable
@@ -133,7 +133,7 @@ def test_delete_checkpoint_never_removes_a_newer_generation(tmp_path: Path) -> N
 
 def test_partial_failure_leaves_nothing_restorable(tmp_path: Path,
                                                    monkeypatch: pytest.MonkeyPatch) -> None:
-    m, ex = setup(tmp_path)
+    m, ex = make_manager(tmp_path)
     wid, (cid,) = finished(m)
 
     def broken(path: Path) -> None:
@@ -148,7 +148,7 @@ def test_partial_failure_leaves_nothing_restorable(tmp_path: Path,
 
 
 def test_reset_demo_is_refused_while_live_and_complete_after(tmp_path: Path) -> None:
-    m, ex = setup(tmp_path)
+    m, ex = make_manager(tmp_path)
     live = m.launch_demo("c-threads")["workload_id"]
     finished(m)
     m.catalog.set_settings(auto_checkpoint_enabled=True)
@@ -164,7 +164,7 @@ def test_reset_demo_is_refused_while_live_and_complete_after(tmp_path: Path) -> 
 
 
 def test_eligibility_reasons_and_interrupted_restore(tmp_path: Path) -> None:
-    m, ex = setup(tmp_path)
+    m, ex = make_manager(tmp_path)
     wid = m.launch_demo("c-threads")["workload_id"]
     first = m.checkpoint(wid)["checkpoint_id"]
     time.sleep(0.15)

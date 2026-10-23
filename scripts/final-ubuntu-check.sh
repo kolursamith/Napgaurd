@@ -89,6 +89,9 @@ rc=$?; tail -3 "$OUT/baseline.log"
 [ $rc -eq 0 ] || blocked "baseline exit $rc (see baseline.log)"
 
 step "3. Every Linux test (Stage 03, MVP, final, GUI smoke) — none may be skipped"
+python3 -m pytest --version > "$OUT/pytest-version.txt" 2>&1
+rc=$?; cat "$OUT/pytest-version.txt"
+[ $rc -eq 0 ] || blocked "system Python cannot run pytest (see pytest-version.txt)"
 python3 -m pytest -q -rs -p no:cacheprovider tests/unit/test_stage03_*.py tests/unit/test_mvp_*.py \
   tests/unit/test_final_*.py > "$OUT/tests.log" 2>&1
 rc=$?; tail -3 "$OUT/tests.log"
