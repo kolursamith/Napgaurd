@@ -176,6 +176,7 @@ def test_gui_smoke_renders_every_screen(short_dir: Path) -> None:
                               env=env, capture_output=True, text=True, timeout=120)
         assert done.returncode == 0, done.stdout + done.stderr
         assert "9 screens rendered; daemon connected" in done.stdout
+        assert "post-launch selection and heartbeat responsive" in done.stdout
     finally:
         service.shutdown()
 

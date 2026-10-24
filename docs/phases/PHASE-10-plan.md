@@ -45,3 +45,37 @@ Date: 2026-10-24
 - Revert only the focused Phase 10 commit(s) created during this phase using normal Git history; do not rewrite shared history.
 - Test fixtures use temporary directories and test-owned sockets/processes. They must not touch real NapGuard data, services, checkpoints, or user configuration.
 - Existing checkpoint generations, user data, systemd units, and global host configuration remain unchanged.
+
+## Ubuntu GUI-freeze remediation addendum — 2026-10-24
+
+New Ubuntu evidence at commit `12e25d67dc2c913010fef6b943acd4e3a4bd88ce` shows that,
+after a real `c-single` launch succeeds, selecting its row makes the entire Tk interface
+unresponsive while the daemon and workload remain healthy. This is a failed Phase 10 GUI
+gate, so it is diagnosed and fixed within Phase 10 rather than starting another phase.
+
+### Added scope
+
+- Trace the Processes `Treeview` selection callback, table repopulation, refresh coalescing,
+  worker delivery, and daemon status fetch path to identify the blocking main-thread cycle.
+- Add a focused regression reproducing selection after a newly launched workload appears.
+- Separate selection-detail rendering from table repopulation so a selection event cannot
+  recursively rebuild its own widget.
+- Preserve selection across refreshes and automatically select a genuinely new workload
+  when there is no safe existing selection.
+- Bound each worker result-pump turn, keep it scheduled after callback exceptions, surface
+  callback failures, and stop workers cleanly when the GUI closes.
+- Add a bounded watchdog that captures Python thread stacks to a private diagnostic file if
+  the Tk heartbeat stalls, without making Tk calls from its monitor thread.
+- Extend the Ubuntu GUI regression so a real display and real test daemon must launch a
+  workload, select it, navigate all nine screens, and prove scheduled Tk heartbeats continue.
+
+### Added tests and exit criteria
+
+1. Pure/fake-widget regression for selection-event recursion and automatic selection.
+2. Worker tests for bounded delivery, callback exceptions, and stop behavior.
+3. Watchdog tests with an injected clock and private temporary output.
+4. Existing GUI presenter, IPC, packaging, and full suites remain green.
+5. Ubuntu `gui --smoke` must exercise post-launch responsiveness; this remains `NOT RUN`
+   until executed on Ubuntu with a display and the real daemon/backend.
+6. The change may be committed and pushed after all local gates pass, but the final verdict
+   remains `READY FOR UBUNTU VERIFICATION` until the Ubuntu interaction is genuinely rerun.

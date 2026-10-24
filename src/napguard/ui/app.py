@@ -29,6 +29,8 @@ from napguard.selftest.run import CLASSES
 
 from . import presenter as pr
 from . import theme
+from .selection import SelectionTracker
+from .watchdog import ResponsivenessWatchdog
 from .worker import Worker
 
 REFRESH_MS = 2000
@@ -270,7 +272,9 @@ class ProcessesPage(Page):
                                              "Last checkpoint", "Last operation"),
                                       (120, 150, 70, 120, 50, 200, 260), height=12)
         frame.pack(fill="both", expand=True)
-        self.tree.bind("<<TreeviewSelect>>", lambda _e: self.update_view(app.store))
+        self._selection = SelectionTracker()
+        self._preferred_selection: str | None = None
+        self.tree.bind("<<TreeviewSelect>>", self._selection_changed)
         ttk.Label(self, text="Details", style="Section.TLabel").pack(anchor="w", pady=(10, 2))
         self.details = text_box(self, 7, app.mode)
         self.details.pack(fill="x")
@@ -282,6 +286,10 @@ class ProcessesPage(Page):
 
     def _reason(self, key: str) -> str:
         return pr.workload_actions(self.selected())[key].reason
+
+    def prefer(self, workload_id: str) -> None:
+        """Select this workload once it appears in a later daemon snapshot."""
+        self._preferred_selection = workload_id
 
     def update_view(self, store: Store) -> None:
         rows: list[tuple[str, Sequence[str]]] = []
@@ -298,7 +306,20 @@ class ProcessesPage(Page):
                 f"{last_op.get('kind')} {last_op.get('state')}"
                 + (f" ({last_op.get('error_code')})" if last_op.get("error_code") else "")
                 if last_op else "none")))
+        row_ids = [iid for iid, _values in rows]
+        target = self._selection.choose(row_ids, self.tree.selection())
+        if self._preferred_selection in row_ids:
+            target = self._preferred_selection
+            self._preferred_selection = None
         fill(self.tree, rows)
+        if target is not None and self.tree.selection() != (target,):
+            self.tree.selection_set(target)
+            self.tree.focus(target)
+            self.tree.see(target)
+        self._selection_changed()
+
+    def _selection_changed(self, _event: object = None) -> None:
+        """Render selection state only; never repopulate the widget from its own event."""
         chosen = self.selected()
         actions = pr.workload_actions(chosen)
         for key, button in self.buttons.items():
@@ -808,7 +829,7 @@ class GuidedDemoPage(Page):
     def __init__(self, parent: tk.Misc, app: App) -> None:
         super().__init__(parent, app)
         self.demo = pr.GuidedDemo()
-        self.worker = Worker(app.root)  # independent of the refresh worker
+        self.worker = Worker(app.root, app.worker_callback_error)  # independent refresh worker
         bar = ttk.Frame(self)
         bar.pack(fill="x", pady=(0, 8))
         self.next_btn = ttk.Button(bar, text="Run Next Step", style="Accent.TButton",
@@ -968,8 +989,11 @@ class App:
         self.mode = "light" if self.config.get("theme") == "light" else "dark"
         theme.apply(root, self.mode)
         self.store = Store()
-        self.worker = Worker(root)
+        self.smoke = smoke
         self.errors: list[str] = []
+        self.worker = Worker(root, self.worker_callback_error)
+        self.watchdog = ResponsivenessWatchdog(root)
+        self._closed = False
         self._fetching = False
         root.title("NapGuard — Intelligent Process Recovery")
         root.geometry("1280x800")
@@ -1108,7 +1132,9 @@ class App:
 
         self.worker.submit(lambda: self.client.call(method, **params), done, self.show_error)
 
-    def run_op(self, label: str, method: str, **params: Any) -> None:
+    def run_op(self, label: str, method: str,
+               on_success: Callable[[dict[str, Any]], None] | None = None,
+               **params: Any) -> None:
         """Submit an operation; report success only when the daemon confirms it."""
         self.set_status(f"{label}: requested, waiting for the daemon…")
 
@@ -1117,18 +1143,41 @@ class App:
             return wait_operation(self.client.call, accepted["operation_id"])
 
         def done(op: dict[str, Any]) -> None:
-            self.refresh_now()
             if op.get("state") == "SUCCEEDED":
+                if on_success is not None:
+                    on_success(op)
                 self.set_status(f"{label}: succeeded in {op.get('duration_ms')} ms.")
             else:
                 self.set_status(f"{label}: {op.get('state')} ({op.get('error_code')}).")
-                self.error_dialog(str(op.get("error_code")), str(op.get("message")), op)
+                failure = IpcError(str(op.get("error_code")), str(op.get("message")), op)
+                if self.smoke:
+                    self.worker_callback_error(failure)
+                else:
+                    self.show_error(failure)
+            self.refresh_now()
 
         self.worker.submit(run, done, self.show_error)
 
     def launch(self, workload_class: str) -> None:
+        def launched(op: dict[str, Any]) -> None:
+            result = op.get("result") or {}
+            workload_id = result.get("workload_id")
+            page = self.pages["Processes"]
+            if workload_id is not None and isinstance(page, ProcessesPage):
+                page.prefer(str(workload_id))
+
         self.run_op(f"Launch {workload_class}", "workloads.launch_demo",
+                    on_success=launched,
                     workload_class=workload_class)
+
+    def worker_callback_error(self, exc: IpcError) -> None:
+        """Keep the result pump alive while making callback defects visible."""
+        detail = f"{exc.code}: {exc.message}\n{exc.details.get('traceback', '')}"
+        self.errors.append(detail)
+        print(detail, file=sys.stderr)
+        self.set_status("Internal GUI callback failed; technical details were recorded.")
+        if not self.smoke:
+            self.show_error(exc)
 
     def checkpoint_first_running(self) -> None:
         running = [w for w in self.store.workloads
@@ -1280,13 +1329,24 @@ class App:
 
     def stop_daemon_and_exit(self) -> None:
         if not self.store.connected:
-            self.root.destroy()
+            self.close()
             return
         if messagebox.askyesno("Stop daemon & exit", "Stop the NapGuard daemon? It stops its "
                                "demo workloads first. Checkpoints and history are kept.",
                                parent=self.root):
             self.worker.submit(lambda: self.client.call("daemon.shutdown", confirm=True),
-                               lambda _r: self.root.destroy(), self.show_error)
+                               lambda _r: self.close(), self.show_error)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.worker.stop()
+        guided = self.pages.get("Guided Demo")
+        if isinstance(guided, GuidedDemoPage):
+            guided.worker.stop()
+        self.watchdog.stop()
+        self.root.destroy()
 
     def on_close(self) -> None:
         if not self.config.get("close_notice_shown"):
@@ -1295,7 +1355,7 @@ class App:
                                 "Stop Daemon & Exit.", parent=self.root)
             self.config["close_notice_shown"] = True
             save_config(self.cfg_path, self.config)
-        self.root.destroy()
+        self.close()
 
 
 def main(socket_path: str, smoke: bool = False) -> int:
@@ -1313,25 +1373,80 @@ def main(socket_path: str, smoke: bool = False) -> int:
     cfg = Path(os.environ.get("NAPGUARD_GUI_CONFIG", str(config_path())))
     app = App(root, Path(socket_path), cfg_path=cfg, smoke=smoke)
     if smoke:
+        def drive_until(predicate: Callable[[], bool], seconds: float) -> bool:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                root.update()
+                if predicate():
+                    return True
+                time.sleep(0.02)
+            return False
+
         for name in app.pages:
             app.show(name)
             root.update()
         # Wait for a REAL answer from the daemon (a completed status/list round trip), not
         # a fixed delay; "connected" is reported only if that answer arrived.
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline and not (app.store.connected and app.store.status):
-            root.update()
-            time.sleep(0.05)
+        connected = drive_until(lambda: app.store.connected and app.store.status is not None,
+                                20.0)
         for name in app.pages:  # render every screen again, now with live data
             app.show(name)
             root.update()
-        connected = app.store.connected and app.store.status is not None
-        root.destroy()
-        if errors:
-            print("\n".join(errors), file=sys.stderr)
+
+        responsive = False
+        if connected:
+            processes = app.pages["Processes"]
+            assert isinstance(processes, ProcessesPage)
+            app.show("Processes")
+            original = {str(w["id"]) for w in app.store.workloads}
+            app.launch("c-single")
+
+            def launched() -> bool:
+                return any(str(w["id"]) not in original and w.get("live")
+                           for w in app.store.workloads)
+
+            if not drive_until(launched, 30.0):
+                errors.append("GUI smoke launch did not produce a live workload.")
+            else:
+                workload = next(w for w in app.store.workloads
+                                if str(w["id"]) not in original and w.get("live"))
+                workload_id = str(workload["id"])
+                if processes.tree.selection() != (workload_id,):
+                    errors.append("Newly launched workload was not automatically selected.")
+                processes.tree.selection_set(workload_id)
+                processes.tree.focus(workload_id)
+                processes.tree.event_generate("<<TreeviewSelect>>")
+                heartbeat: list[bool] = []
+                root.after(100, lambda: heartbeat.append(True))
+                responsive = drive_until(lambda: bool(heartbeat), 3.0)
+                if not responsive:
+                    errors.append("Tk heartbeat did not run after workload selection.")
+                for name, button in app.nav.items():
+                    button.invoke()
+                    root.update()
+                    if app.current != name:
+                        errors.append(f"Navigation did not reach {name} after launch.")
+                app.run_op("Smoke stop", "workloads.stop", workload_id=workload_id)
+                if not drive_until(
+                        lambda: any(str(w["id"]) == workload_id and not w.get("live")
+                                    for w in app.store.workloads), 30.0):
+                    errors.append("GUI smoke could not stop its launched workload.")
+                else:
+                    app.run_op("Smoke cleanup", "history.delete",
+                               workload_ids=[workload_id], confirm=True)
+                    if not drive_until(
+                            lambda: all(str(w["id"]) != workload_id
+                                        for w in app.store.workloads), 30.0):
+                        errors.append("GUI smoke could not remove its workload history.")
+        else:
+            errors.append("GUI smoke could not connect to the daemon.")
+        app.close()
+        all_errors = [*errors, *app.errors]
+        if all_errors:
+            print("\n".join(all_errors), file=sys.stderr)
             return 1
         print(f"GUI smoke test: {len(app.pages)} screens rendered; daemon "
-              f"{'connected' if connected else 'NOT reachable'}")
+              f"connected; post-launch selection and heartbeat responsive")
         return 0
     root.mainloop()
     if errors:

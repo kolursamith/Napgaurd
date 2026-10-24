@@ -13,7 +13,7 @@ from collections.abc import Callable
 from typing import Any
 
 from napguard.daemon.ipc import IpcError
-from napguard.ui.worker import POLL_MS, Worker
+from napguard.ui.worker import MAX_CALLBACKS_PER_PUMP, POLL_MS, Worker
 
 
 class FakeRoot:
@@ -70,6 +70,39 @@ def test_pump_reschedules_itself_until_stopped() -> None:
     assert len(root.pending) == 1
     root.run_pending()
     assert len(root.pending) == 1  # rescheduled
-    worker.stopped = True
+    worker.stop()
     root.run_pending()
     assert root.pending == []
+
+
+def test_pump_is_bounded_and_reschedules_immediately_for_a_backlog() -> None:
+    root = FakeRoot()
+    worker = Worker(root)
+    delivered: list[int] = []
+    for value in range(MAX_CALLBACKS_PER_PUMP + 3):
+        worker.results.put((delivered.append, value))
+
+    assert worker.pump() == MAX_CALLBACKS_PER_PUMP
+    assert delivered == list(range(MAX_CALLBACKS_PER_PUMP))
+    assert worker.pump() == 3
+    worker.stop()
+
+
+def test_callback_exception_is_reported_without_stopping_the_pump() -> None:
+    root = FakeRoot()
+    failures: list[IpcError] = []
+    worker = Worker(root, failures.append)
+    delivered: list[int] = []
+
+    def bad_callback(_value: object) -> None:
+        raise RuntimeError("selection renderer broke")
+
+    worker.results.put((bad_callback, None))
+    worker.results.put((delivered.append, 2))
+    assert worker.pump() == 2
+    assert delivered == [2]
+    assert len(failures) == 1
+    assert failures[0].code == "INTERNAL"
+    assert "selection renderer broke" in failures[0].details["traceback"]
+    assert root.pending
+    worker.stop()

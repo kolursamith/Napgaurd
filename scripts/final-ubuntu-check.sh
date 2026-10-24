@@ -131,6 +131,8 @@ if [ "$RUN" = yes ]; then
   NAPGUARD_GUI_CONFIG="$OUT/gui.json" ng gui --smoke > "$OUT/gui-smoke.txt" 2>&1 || failed "GUI smoke failed"
   cat "$OUT/gui-smoke.txt"
   grep -q 'daemon connected' "$OUT/gui-smoke.txt" || failed "GUI did not connect to the daemon"
+  grep -q 'post-launch selection and heartbeat responsive' "$OUT/gui-smoke.txt" || \
+    failed "GUI did not prove post-launch responsiveness"
 
   step "8. Launch, checkpoint, stop, verify, restore (genuine DMTCP)"
   ng launch-demo --class c-single > "$OUT/launch.txt" 2>&1 || failed "launch failed"

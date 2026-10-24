@@ -156,3 +156,102 @@ included.
 validation gates pass. Mandatory Ubuntu gates are `NOT RUN`, so Phase 10 cannot be marked
 fully complete and no later phase is started. STOP pending the exact Ubuntu commands in the
 handoff and the returned evidence logs.
+
+---
+
+## Ubuntu GUI-freeze remediation report — 2026-10-24
+
+### Reported failure and root cause
+
+New target evidence at base commit `12e25d67dc2c913010fef6b943acd4e3a4bd88ce`
+showed that a genuine `c-single` workload launched successfully and remained alive, but the
+GUI stopped responding after the row was selected. Source tracing identified a deterministic
+Tk event cycle in `ProcessesPage`:
+
+1. `<<TreeviewSelect>>` called the complete `update_view` method.
+2. `update_view` called `fill`, which deleted every row, including the selected row.
+3. `fill` inserted the rows again and restored the selection.
+4. Deleting and restoring the selection generated another `<<TreeviewSelect>>` event.
+5. The queued callbacks repeated the rebuild and starved ordinary Tk input and paint events.
+
+No synchronous daemon or DMTCP call was found on the Tk thread. Refresh IPC and operation
+polling remain on the background worker. The daemon and workload staying healthy during the
+freeze is consistent with this GUI-only event storm. The source cycle is proven locally; the
+reported Ubuntu symptom still requires a rerun on the target before it can be declared fixed
+there.
+
+### Changes made
+
+- Bound `<<TreeviewSelect>>` to a selection-only renderer. That callback now changes only
+  action eligibility and the details panel; it cannot repopulate its own `Treeview`.
+- Added a Tk-independent selection policy that preserves a valid current row, selects a
+  genuinely new row when appropriate, and supports explicitly selecting the workload ID
+  returned by a successful launch.
+- Made successful GUI launches register the returned workload ID before requesting the next
+  snapshot, eliminating timing-dependent selection.
+- Bounded each worker pump turn to 32 callbacks, bounded queued jobs to 64, kept the pump
+  scheduled after callback exceptions, surfaced callback tracebacks, and stopped both GUI
+  workers during orderly window close.
+- Added a watchdog whose monitor thread observes a main-thread heartbeat without calling Tk.
+  A stall longer than five seconds produces a mode-0600, size-capped Python thread-stack dump
+  at the XDG NapGuard data location. It captures no frame locals.
+- Expanded `gui --smoke` to connect, launch `c-single`, require automatic row selection,
+  generate a selection event, prove a scheduled Tk heartbeat still runs, navigate all nine
+  screens, stop the launched workload, and delete only that smoke-created history record.
+  Existing user history is not reset or deleted.
+- Made the final Ubuntu verifier require the new post-launch responsiveness success marker.
+
+### Commands and actual results
+
+| Command | Result |
+|---|---|
+| Focused worker/selection/watchdog/GUI-smoke selection | PASS: 7 passed, 1 skipped, 10 deselected; the skip requires Tkinter and an Ubuntu desktop display |
+| `.venv/bin/ruff check .` | PASS |
+| `.venv/bin/mypy` | PASS: no issues in 82 source files |
+| `.venv/bin/python -m pytest -q` in the permitted environment, after all edits | PASS: **439 passed, 33 skipped**, 0 failed in 83.12 s |
+| Same full suite in the restricted command sandbox | Interrupted after 132 passes because AF_UNIX `bind` and `ps` were denied; 15 displayed failures were sandbox `EPERM`/timeouts, not product regressions |
+| `find scripts experiments -type f -name '*.sh' -exec bash -n {} +` | PASS |
+| `.venv/bin/python -m pytest -q tests/docs/test_docs_consistency.py` | PASS: 73 passed |
+| `bash scripts/final-ubuntu-check.sh 12e25d...` on macOS | Correctly refused with `run inside Ubuntu`, exit 2 |
+| `git diff --check` | PASS before this report update; rerun before commit |
+
+The 33 full-suite skips are explicitly platform-gated: Linux `/proc`, Linux/`ss`,
+`SO_PEERCRED`, or Tk plus a desktop display. They are not counted as passes.
+
+### Git diff summary before commit
+
+- `src/napguard/ui/app.py`: non-recursive process selection, launch-result selection,
+  callback error reporting, orderly worker/watchdog shutdown, and post-launch GUI smoke.
+- `src/napguard/ui/selection.py`: pure refresh/selection policy.
+- `src/napguard/ui/worker.py`: bounded queues/pump, callback isolation, and stop behavior.
+- `src/napguard/ui/watchdog.py`: private, bounded event-loop stall diagnostics.
+- `tests/unit/test_final_gui_worker.py`: bounded pump, error recovery, and stop regressions.
+- `tests/unit/test_final_gui_responsiveness.py`: selection recursion/policy and watchdog tests.
+- `tests/unit/test_final_packaging_ipc.py`: stronger GUI-smoke acceptance marker.
+- `scripts/final-ubuntu-check.sh`: requires post-launch responsiveness evidence.
+- Phase 10 plan/report: remediation scope, evidence, limitations, and gates.
+
+No checkpoint image, daemon catalog, user workload, VM state, generated evidence directory,
+secret, or host configuration was modified.
+
+### Remediation gate table
+
+| Criterion | Command/evidence | Status | Remaining risk |
+|---|---|---|---|
+| Selection callback cannot rebuild its own tree | AST regression plus selection-policy tests | PASS | Actual Tk event delivery remains target-gated |
+| Newly launched workload selection is deterministic | Launch result ID is preferred before refresh; policy tests pass | PASS locally | Must be observed on Ubuntu/Tk |
+| Worker cannot monopolize result delivery | 32-callback bound and backlog regression | PASS | Real desktop load remains target-gated |
+| Callback failure does not stop result delivery | Exception-isolation regression | PASS | Dialog rendering remains target-gated |
+| Stall produces bounded private evidence | Injected-clock watchdog test; mode 0600 and 256 KiB cap | PASS | A real hang dump is diagnostic evidence, not recovery |
+| Full portable regression suite | 439 passed, 33 platform skips | PASS | Platform skips remain mandatory |
+| Ruff / strict mypy / shell syntax / docs | Commands above | PASS | None known locally |
+| Post-launch GUI smoke on a real display | Enhanced test exists; no Tk/display on this Mac | NOT RUN | Mandatory Ubuntu confirmation of the reported failure |
+| Genuine DMTCP launch/checkpoint/restore | Final Ubuntu verifier steps 5–13 | NOT RUN | Mandatory; test doubles are not acceptance evidence |
+| Ubuntu 24.04 ARM64 final verifier, clean SHA | `scripts/final-ubuntu-check.sh <NEW_SHA> --run-demo` | NOT RUN | Blocks presentation-ready and final-complete claims |
+
+### Remediation status
+
+**READY FOR UBUNTU VERIFICATION, not Ubuntu-verified.** The deterministic source defect is
+removed and all locally executable gates pass. Phase 10 remains open because the exact
+post-launch interaction, Linux-only suites, and genuine DMTCP workflow are mandatory and
+`NOT RUN` on this macOS host. STOP after commit/push; do not advance to another phase.
